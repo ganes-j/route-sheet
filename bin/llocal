@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""llocal — thin CLI over the local Ollama HTTP API.
+
+Invocation primitive for offloading bounded subtasks to local models.
+Routing intelligence lives in ~/.claude/LOCAL_MODELS.md (read by Claude),
+not here — this script only polls, runs, and batches.
+
+  llocal models [--names]              poll installed models (no model load)
+  llocal run MODEL [PROMPT]            single completion; PROMPT or stdin
+       [--system S] [--json SCHEMA] [--temp T] [--num-predict N]
+  llocal batch MODEL FILE.jsonl        one completion per line; emits JSONL
+       [--workers N] [...same run flags]
+
+--json takes either the literal string "json" (free-form JSON mode) or a
+JSON-Schema string (constrained output). batch lines are either a bare prompt
+string or {"id": ..., "prompt": ...}; output is {"id": ..., "out": ...} or
+{"id": ..., "error": ...}, order-preserved.
+
+Env: OLLAMA_HOST (default http://localhost:11434). For real --workers>1
+concurrency set OLLAMA_NUM_PARALLEL on the server, else requests queue.
+"""
+import argparse
+import json
+import os
+import socket
+import sys
+import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor
+
+HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+
+
+def _is_timeout(exc):
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout))
+
+
+def _post(path, payload, timeout=600, retries=1):
+    req = urllib.request.Request(
+        HOST + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.load(r)
+        except Exception as e:
+            # Retry once on timeout only — a hung request shouldn't block up to
+            # `timeout` seconds with no second chance. Connection errors (server
+            # down) are not retried; retrying would just double the failure wait.
+            if _is_timeout(e) and attempt < retries:
+                attempt += 1
+                continue
+            raise
+
+
+def _get(path, timeout=15):
+    with urllib.request.urlopen(HOST + path, timeout=timeout) as r:
+        return json.load(r)
+
+
+def cmd_models(args):
+    try:
+        data = _get("/api/tags")
+    except urllib.error.URLError as e:
+        sys.exit(f"llocal: cannot reach Ollama at {HOST} — is `ollama serve` running? ({e})")
+    models = sorted(data.get("models", []), key=lambda m: m["name"])
+    if args.names:
+        for m in models:
+            print(m["name"])
+        return
+    for m in models:
+        d = m.get("details", {})
+        size = round(m.get("size", 0) / 1e9, 1)
+        print(f"{m['name']:<34} {size:>5} GB  {d.get('family',''):<10} {d.get('parameter_size','')}")
+
+
+def _resolve_format(json_arg):
+    if json_arg is None:
+        return None
+    if json_arg == "json":
+        return "json"
+    try:
+        return json.loads(json_arg)
+    except json.JSONDecodeError:
+        sys.exit("llocal: --json must be the literal 'json' or a valid JSON-Schema string")
+
+
+def _guard_num_predict(model, num_predict):
+    # The qwen3.5 reasoning model emits its answer after a reasoning pass; any
+    # num_predict cap truncates before the answer and returns empty output.
+    if num_predict is not None and "qwen3.5" in model:
+        sys.exit("llocal: --num-predict truncates the qwen3.5 reasoning model to empty output — "
+                 "omit it (see LOCAL_MODELS.md)")
+
+
+def _chat(model, prompt, system, fmt, temp, num_predict, timeout=600):
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    payload = {"model": model, "messages": messages, "stream": False}
+    if fmt is not None:
+        payload["format"] = fmt
+    options = {}
+    if temp is not None:
+        options["temperature"] = temp
+    if num_predict is not None:
+        options["num_predict"] = num_predict
+    if options:
+        payload["options"] = options
+    data = _post("/api/chat", payload, timeout=timeout)
+    return data["message"]["content"]
+
+
+def cmd_run(args):
+    _guard_num_predict(args.model, args.num_predict)
+    prompt = args.prompt if args.prompt is not None else sys.stdin.read()
+    if not prompt.strip():
+        sys.exit("llocal: empty prompt (pass an arg or pipe via stdin)")
+    fmt = _resolve_format(args.json)
+    try:
+        out = _chat(args.model, prompt, args.system, fmt, args.temp, args.num_predict, args.timeout)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"llocal: Ollama error {e.code}: {e.read().decode(errors='replace')}")
+    except Exception as e:
+        if _is_timeout(e):
+            sys.exit(f"llocal: request timed out after {args.timeout}s (retried once) — model too slow or Ollama stuck")
+        if isinstance(e, urllib.error.URLError):
+            sys.exit(f"llocal: cannot reach Ollama at {HOST} ({e})")
+        raise
+    print(out)
+
+
+def cmd_batch(args):
+    _guard_num_predict(args.model, args.num_predict)
+    fmt = _resolve_format(args.json)
+    items = []
+    with open(args.file) as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, str):
+                    items.append({"id": i, "prompt": obj})
+                else:
+                    items.append({"id": obj.get("id", i), "prompt": obj["prompt"]})
+            except (json.JSONDecodeError, KeyError):
+                items.append({"id": i, "prompt": line})
+
+    def work(item):
+        try:
+            out = _chat(args.model, item["prompt"], args.system, fmt, args.temp, args.num_predict, args.timeout)
+            return {"id": item["id"], "out": out}
+        except Exception as e:
+            return {"id": item["id"], "error": str(e)}
+
+    ok = errs = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        for result in ex.map(work, items):
+            if "error" in result:
+                errs += 1
+            else:
+                ok += 1
+            print(json.dumps(result, ensure_ascii=False), flush=True)
+    # Summary to stderr + non-zero exit so a caller can't silently lose items
+    # (local runners drop/time-out individual requests — every line must be verified).
+    print(f"llocal batch: {ok} ok, {errs} errors ({len(items)} items)", file=sys.stderr)
+    if errs:
+        sys.exit(1)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="llocal", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pm = sub.add_parser("models", help="poll installed models (no model load)")
+    pm.add_argument("--names", action="store_true", help="print bare names only (easy to diff)")
+    pm.set_defaults(func=cmd_models)
+
+    def add_run_flags(sp):
+        sp.add_argument("--system", help="system prompt")
+        sp.add_argument("--json", help="'json' for free-form JSON, or a JSON-Schema string for constrained output")
+        sp.add_argument("--temp", type=float, help="temperature")
+        sp.add_argument("--num-predict", type=int, dest="num_predict", help="max tokens to generate")
+        sp.add_argument("--timeout", type=int, default=600,
+                        help="per-request timeout seconds (default 600; retried once on timeout)")
+
+    pr = sub.add_parser("run", help="single completion")
+    pr.add_argument("model")
+    pr.add_argument("prompt", nargs="?", help="prompt text; omit to read stdin")
+    add_run_flags(pr)
+    pr.set_defaults(func=cmd_run)
+
+    pb = sub.add_parser("batch", help="one completion per JSONL line")
+    pb.add_argument("model")
+    pb.add_argument("file", help="JSONL file: bare-string or {id,prompt} per line")
+    pb.add_argument("--workers", type=int, default=1, help="concurrent requests (set OLLAMA_NUM_PARALLEL too)")
+    add_run_flags(pb)
+    pb.set_defaults(func=cmd_batch)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
