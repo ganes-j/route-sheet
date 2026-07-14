@@ -1,0 +1,11 @@
+# Example private-term blocklist for scripts/leak-check.sh.
+# Copy to scripts/leak-terms.local.txt (gitignored) and fill with YOUR terms:
+# employer/client names, prod hostnames, internal repo names, usernames,
+# credential env-var names, PR/commit refs from private repos.
+#
+# One term per line (case-insensitive). Optional TAB-separated allowlist for a
+# single file where the term is intentional (e.g. your name in LICENSE):
+#
+# yourlastname	ALLOW:LICENSE
+# yourco-internal-repo
+# prod-db.internal.example.com

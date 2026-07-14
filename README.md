@@ -86,6 +86,7 @@ skills/        route-plan · codex-dispatch · router-flywheel   (Claude Code SK
 bin/llocal     stdlib-only Ollama CLI (models / run / batch)
 hooks/         SessionStart kill-switch context injector
 fixtures/      sample plan + expected manifest (SETUP.md's smoke test)
+scripts/       leak-check.sh — pre-publish sanitization gate (blocklist stays local, gitignored)
 SETUP.md       agent-executable install runbook (tiered, idempotent, verified)
 AGENTS.md      orientation for agents consuming this repo
 ```
