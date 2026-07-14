@@ -20,10 +20,12 @@ Once `ROUTING_POLICY.md` has routed a task to `llocal`, pick the model here. Loc
 | `qwen3.5:35b-a3b-coding-nvfp4` | Code/text LLM (35B MoE, ~3B active, MLX) | Code gen/refactor subtasks, batch text classification/extraction/summarization, JSON-schema extraction, autonomous loops | Correctness-critical SQL against prod, architecture decisions, anything shipped unverified. **Reasoning model — never cap with `--num-predict`** (any cap truncates before the answer → empty `out`). | ❌ **no gain** — 35B saturates the GPU per request (benchmarked 2026-06-25: 3 items, w1 52s vs w4 59s). Use `--workers 1`; run big batches sequential in background. | 21.9 GB |
 | `llava:13b` | Vision + language (VLM) | Batch screenshot/image OCR & description, visual triage before the coordinator decides | Accuracy-critical vision (frontier models are natively multimodal and better); use only for batch-volume or strict local-only privacy | ❓ untested; likely seq (13B) — benchmark before relying on `--workers` | 8.0 GB |
 | `llava:latest` | Vision + language (7B) | Lighter/faster image pass than llava:13b | Same as above; lower quality than :13b | ❓ untested (~7B) — may batch; benchmark before relying on `--workers` | 4.7 GB |
+| `phi4-mini:latest` | Small-fast LLM (3.8B, phi3) | High-volume trivial classification/extraction; the fan-out lane (~0.5s/item warm) | Anything needing reasoning depth or long-context nuance — it's a 3.8B; verify every item | ✅ **real gain** (benchmarked 2026-07-14: 20 items, w1 9.8s vs w4 5.1s ≈ 1.9x; server `OLLAMA_NUM_PARALLEL` must match `--workers`, session-scoped via `launchctl setenv` + app restart, restore after) | 2.5 GB |
+| `nomic-embed-text:latest` | Embeddings (137M, 768-dim) | Local semantic search / clustering / dedup / RAG over data that must stay local | **Not chat-capable — `llocal run/batch` won't work** (they call `/api/chat`); hit `/api/embed` directly (accepts input arrays for batch) until llocal grows an `embed` subcommand | n/a (embeddings) | 0.3 GB |
 
 *Parallel legend:* ✅ concurrency helps (set `--workers N` = server `OLLAMA_NUM_PARALLEL=N`) · ❌ no gain, run sequential · ❓ unknown — benchmark once, then record the result here.
 
-*Last reconciled with `llocal models`: 2026-06-25.*
+*Last reconciled with `llocal models`: 2026-07-14.*
 
 ---
 
@@ -38,14 +40,14 @@ Curated shortlist of generally-available Ollama models worth pulling **only if a
 | `deepseek-r1:70b` | Reasoning | Heavy local chain-of-thought on **private data kept off-cloud**. | ~40 GB |
 | `qwen2.5-coder:32b` | Code | Stronger/cleaner code-gen than the installed qwen3.5 for larger refactors. | ~20 GB |
 | `llama3.2-vision:90b` / `qwen3-vl` | Vision (strong) | Accuracy-critical batch vision beyond llava's quality ceiling. | ~55 GB / varies |
-| `nomic-embed-text` | Embeddings | **Gap: no embeddings model installed** — local semantic search / clustering / dedup / RAG over data that must stay local (e.g. customer records). | <1 GB |
-| `mxbai-embed-large` | Embeddings | SOTA small embeddings; alt to nomic. | ~0.7 GB |
-| `phi4-mini` (3.8B) / `smollm2` | Small-fast | High-volume trivial classification/extraction where even the coding qwen is overkill; fastest fan-out — small enough that `--workers N` + `OLLAMA_NUM_PARALLEL=N` gives **real** concurrency (the parallel-batch lever the big model lacks). | <3 GB |
+| `mxbai-embed-large` | Embeddings | SOTA small embeddings; alt to the installed nomic if its quality ceiling shows. | ~0.7 GB |
+| `smollm2` | Small-fast | Even lighter fan-out alt to the installed phi4-mini if 3.8B proves too slow for a huge batch. | <2 GB |
 
 *Last refreshed from ollama.com/library: 2026-06-25.*
 
 ### Refresh protocol (keep this catalog current)
 - **Staleness-triggered (primary mechanism):** whenever you consult this catalog, check the "Last refreshed" date. If >30 days old, refresh it — fetch `https://ollama.com/library?sort=popular`, reconcile rows (add notable new models, drop deprecated, fix sizes/tags), update the date. If you can't fetch, tell the user it's stale.
+- **Community-signal pass (offer, never auto-run):** on a staleness refresh — or whenever a routing gap has no obvious candidate — OFFER a scoped recent-community-research pass (whatever research tool is available, e.g. a last-30-days community search: "best local Ollama models for coding / embeddings / vision on Apple Silicon") to source which models people actually favor right now, and fold findings into candidate rows. External research costs time/credits, so offer-then-confirm (same pattern as route-plan's staleness offer). Division of labor: the ollama.com fetch is the factual source (tags/sizes/existence); the community pass is the which-models-are-winning signal. Findings adjust the candidate list only — they never touch the installed table without a real pull + reconcile.
 - **On pull:** when the user installs a candidate, move that row up into the installed Routing Table (run `llocal models` to confirm) and update both "Last" dates.
 - Keep this curated to high-value gap-fillers for your actual work — the public library has hundreds of models; this is not an exhaustive mirror.
 
