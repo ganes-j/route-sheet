@@ -1,18 +1,140 @@
 # SETUP.md — agent-executable install
 
-> **Status: skeleton.** This runbook is written for an agent (e.g. Claude Code) to execute on a user's behalf. Structure below is the contract; steps are being filled in.
+This runbook is written for an agent (Claude Code or equivalent) executing on a user's behalf. Humans can follow it too — every step is a plain shell command with its expected output.
 
-## Adoption tiers
+**Agent contract — read first:**
+- Execute phases in order. Never skip a consent gate. All writes are idempotent: check before writing, append rather than overwrite, and never clobber an existing file silently — on any conflict, show the diff and ask.
+- Every verify step states its expected output. Paste the *actual* output in your report. If a verify fails, stop that tier and report it — do not claim it.
+- Finish with the **honest tier report** (Phase 5). "Tier 1 achieved, Tier 2 unavailable: codex not found" is a successful install. A silent partial success is a failed one.
+- `$RS` below means the absolute path of this repo's checkout.
 
-- **Tier 0 — read-only.** Nothing installed. Use `docs/` to learn the pattern.
-- **Tier 1 — policy + manifests.** Routing policy, route-plan skill, kill switch. Coordinator-only execution; no Codex, no local models.
-- **Tier 2 — + Codex lane.** Adds codex-dispatch with the constraint layer and worktree scrub.
-- **Tier 3 — + local-model lane.** Adds `llocal` + Ollama.
+---
 
-## Runbook shape (every tier)
+## Phase 1 — Preflight (read-only, run everything)
 
-1. **Preflight** — capability probes with expected outputs.
-2. **Consent gate** — exact list of writes before any write.
-3. **Apply** — idempotent, marker-bounded, append-only.
-4. **Verify** — per-step checks + the sample-plan smoke test in `fixtures/`.
-5. **Degrade honestly** — report the tier reached and exactly what is unavailable.
+Probe capabilities; decide the target tier. Nothing here writes.
+
+| # | Probe | Command | Interpreting the output |
+|---|---|---|---|
+| 1 | Claude Code home | `test -d ~/.claude && echo ok` | `ok` → proceed. Anything else → you are not on a Claude Code host; Tier 0 only. |
+| 2 | U-ID plan workflow | Check your available skills for `ce-plan` (compound-engineering plugin). | Present → Tier 1 possible. Absent → Tier 1 still installs, but routing has nothing to consume until a U-ID plan workflow exists; say so in the report. |
+| 3 | Verification discipline | Check your available skills for `verification-before-completion` (superpowers plugin). | Absent is non-blocking — note in the report that the re-check gate has no enforcement backstop. |
+| 4 | Python | `python3 --version` | 3.9+ → ok. |
+| 5 | git worktrees | `git --version` | Any modern git → ok (Tier 2 scrub path). |
+| 6 | Codex CLI | `command -v codex && codex --version` | Present → Tier 2 possible. Absent → Tier 2 unavailable. |
+| 7 | Codex config pin | `test -f ~/.codex/config.toml && grep -c '^model' ~/.codex/config.toml` | `1`+ → pinned. Present-but-unpinned or absent → Tier 2 degraded; instruct the user to pin a model (never write this file yourself — it may hold auth). |
+| 8 | Ollama server | `curl -s --max-time 3 http://localhost:11434/api/tags >/dev/null && echo up` | `up` → Tier 3 possible. Anything else → Tier 3 unavailable. |
+| 9 | Local models | `command -v ollama && ollama list` | Note which models exist; [templates/LOCAL_MODELS.md](templates/LOCAL_MODELS.md) rows want a coding model and optionally a vision model. |
+
+**Target tier** = 1 + (Tier 2 if probes 6–7 pass) + (Tier 3 if probe 8 passes). Announce it before Phase 2.
+
+---
+
+## Phase 2 — Consent gate (blocking)
+
+Present the exact write list for the target tier and get a yes before any write.
+
+**Tier 1 writes:**
+- Copy → `~/.claude/ROUTING_POLICY.md` (from `templates/ROUTING_POLICY.md`)
+- Copy → `~/.claude/ROUTER_STATUS.md` (from `templates/ROUTER_STATUS.md`, with today's date filled in)
+- Copy → `~/.claude/skills/route-plan/SKILL.md`, `~/.claude/skills/router-flywheel/SKILL.md`
+- Copy → `~/.claude/router-session-context.py` (from `hooks/`)
+- Merge → one SessionStart hook entry into `~/.claude/settings.json`
+- Insert → the marker-bounded block from `templates/claude-md-router-section.md` into `~/.claude/CLAUDE.md`
+
+**Tier 2 adds:** copy → `~/.claude/skills/codex-dispatch/SKILL.md`. (No writes to `~/.codex/` — ever.)
+
+**Tier 3 adds:** copy → `~/.claude/bin/llocal` (`chmod +x`), copy → `~/.claude/LOCAL_MODELS.md`.
+
+Nothing else is touched. The user can exclude any item; record exclusions for the report.
+
+---
+
+## Phase 3 — Apply (idempotent)
+
+For every **file copy**: if the destination doesn't exist, copy. If it exists and is identical, skip and note "already installed." If it exists and differs, show the diff and ask before replacing. Suggested shape:
+
+```bash
+dst=~/.claude/ROUTING_POLICY.md; src="$RS/templates/ROUTING_POLICY.md"
+if [ ! -f "$dst" ]; then cp "$src" "$dst" && echo "installed $dst"
+elif diff -q "$src" "$dst" >/dev/null; then echo "already installed (identical)"
+else echo "CONFLICT — showing diff, asking user"; diff "$dst" "$src"; fi
+```
+
+**CLAUDE.md block** — marker-bounded, insert-once:
+
+```bash
+grep -q 'MODEL ROUTER START' ~/.claude/CLAUDE.md 2>/dev/null \
+  && echo "block already present — leaving untouched" \
+  || { printf '\n'; sed -n '/^<!-- MODEL ROUTER START/,/^<!-- MODEL ROUTER END -->/p' \
+       "$RS/templates/claude-md-router-section.md"; } >> ~/.claude/CLAUDE.md
+```
+
+(The `sed` extracts only the marked block from the template, skipping the template's own explanatory header. Create `~/.claude/CLAUDE.md` first if it doesn't exist.)
+
+**settings.json hook** — merge, never overwrite. Add this entry to the `hooks.SessionStart` array (matcher `startup|resume|clear|compact`) only if no existing entry mentions `router-session-context.py`:
+
+```json
+{ "type": "command", "command": "python3 ~/.claude/router-session-context.py 2>/dev/null || true", "async": false }
+```
+
+Use a JSON-aware merge (python3 + `json` module), preserve every existing hook, and write back with the original structure. If `settings.json` doesn't exist, create it with only this hook. Show the user the resulting `SessionStart` array.
+
+**ROUTER_STATUS.md** — replace both `YYYY-MM-DD` placeholders with today's date and note the installed tier in the log line.
+
+---
+
+## Phase 4 — Verify (run every check for the installed tier; paste outputs)
+
+**4a. Hook + kill switch (Tier 1):**
+```bash
+python3 ~/.claude/router-session-context.py            # expect: {"hookSpecificOutput": ... "MODEL ROUTER: ACTIVE ..."}
+touch ~/.claude/.router-off
+python3 ~/.claude/router-session-context.py            # expect: ... "MODEL ROUTER: DISABLED ..."
+rm ~/.claude/.router-off
+python3 ~/.claude/router-session-context.py            # expect: ACTIVE again
+```
+All three must exit 0 with the expected strings. **Do not leave `.router-off` behind.**
+
+**4b. Files landed (Tier 1):**
+```bash
+ls ~/.claude/ROUTING_POLICY.md ~/.claude/ROUTER_STATUS.md \
+   ~/.claude/skills/route-plan/SKILL.md ~/.claude/skills/router-flywheel/SKILL.md
+grep -c 'MODEL ROUTER START' ~/.claude/CLAUDE.md        # expect: 1  (exactly — 2+ means a double insert; fix it)
+```
+
+**4c. Routing smoke test (Tier 1) — the load-bearing check.** Perform the route-plan procedure (as installed at `~/.claude/skills/route-plan/SKILL.md`) against the bundled fixture plan `fixtures/sample-plan/plan.md`, writing the manifest to a scratch directory — not into this repo. Then compare your manifest's `## Assignments` against `fixtures/sample-plan/expected-routing.md`: **the executor per U-ID must match** (reasons may be worded differently). A mismatch means the policy or skill didn't install correctly — diagnose before reporting.
+
+**4d. Codex lane (Tier 2):** `command -v codex` and re-confirm the config pin (probe 7). Do **not** run a live dispatch as part of setup.
+
+**4e. Local lane (Tier 3):**
+```bash
+~/.claude/bin/llocal models      # expect: a table of installed models, or a clean error naming the Ollama endpoint
+```
+If no coding model is installed, recommend one from `~/.claude/LOCAL_MODELS.md` — recommend, don't pull (multi-GB download needs consent).
+
+**4f. New-session check (Tier 1):** the SessionStart hook fires on the *next* session. Tell the user: after restarting the session, the context should contain `MODEL ROUTER: ACTIVE`.
+
+---
+
+## Phase 5 — The honest tier report
+
+End with exactly this shape, filled with real results:
+
+```
+route-sheet install report
+- Tier achieved: <0|1|2|3>
+- Verified: <each 4a–4e check run, with actual output pasted or summarized>
+- Unavailable: <tier — concrete reason, e.g. "Tier 2 — codex not found on PATH">
+- Excluded by user: <consent-gate exclusions, or none>
+- Notes: <plugin gaps from preflight probes 2–3; model recommendations; next-session hook check>
+```
+
+Never round a partial install up. The report is the deliverable.
+
+---
+
+## Uninstall / disable
+
+- **Soft-disable (reversible, instant):** `touch ~/.claude/.router-off`. Every skill declines; the hook announces DISABLED. Re-enable: `rm ~/.claude/.router-off`.
+- **Full removal:** delete the copied files (Phase 2 list), remove the marker-bounded block from `~/.claude/CLAUDE.md` (everything between and including the `MODEL ROUTER START`/`END` comments), and remove the `router-session-context.py` entry from `settings.json`'s SessionStart hooks.
