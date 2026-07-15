@@ -61,7 +61,7 @@ You don't need the whole stack. Each tier is independently useful and independen
 | Tier | What you get | Needs |
 |---|---|---|
 | **0 — Read** | The pattern: policy format, constraint layer, manifest, ledger, flywheel gating | Nothing |
-| **1 — Policy + manifests** | route-plan writes manifests; coordinator executes everything; kill switch; outcome lines | Claude Code + a U-ID plan workflow |
+| **1 — Policy + manifests** | route-plan writes manifests; coordinator executes everything; kill switch; outcome lines | Claude Code (a U-ID plan workflow helps but isn't required — route-plan mints IDs from an ID-less TODO/tasklist/pasted plan) |
 | **2 — + Codex lane** | codex-dispatch with credential scan, worktree scrub, re-check, circuit breaker | Tier 1 + Codex CLI |
 | **3 — + local lane** | `llocal` run/batch for bulk, PII-bound, and vision work | Tier 1 + Ollama (+ models) |
 
@@ -70,7 +70,7 @@ You don't need the whole stack. Each tier is independently useful and independen
 | Dependency | Needed at | Verified against | Without it |
 |---|---|---|---|
 | [Claude Code](https://claude.com/claude-code) (skills, SessionStart hooks, settings.json) | Tier 1+ | July 2026 builds | The skills and hook have no host. The *documents* still transfer to any agent that reads markdown instructions. |
-| [compound-engineering plugin](https://github.com/EveryInc/compound-engineering-plugin) (`/ce-plan`, `/ce-work`, `/ce-compound`) | Tier 1+ | v3.14.x | No U-ID'd plans → nothing to route. Any plan format with stable per-unit IDs can substitute if you adapt route-plan's grep. |
+| [compound-engineering plugin](https://github.com/EveryInc/compound-engineering-plugin) (`/ce-plan`, `/ce-work`, `/ce-compound`) | **Recommended**, Tier 1+ | v3.14.x | Gives you U-ID'd plans for free and the full plan→route→work→compound loop. Not required: route-plan mints stable IDs from an ID-less TODO/tasklist/pasted plan, so any structured input is routable — the plugin makes it nicer, not possible. |
 | [superpowers plugin](https://github.com/obra/superpowers) (verification-before-completion discipline) | Recommended, Tier 1+ | July 2026 | The re-check gate loses its enforcement backstop; you must supply the "paste real output before claiming done" discipline yourself. |
 | [Codex CLI](https://github.com/openai/codex) + ChatGPT plan auth + `~/.codex/config.toml` model pin | Tier 2 | 0.143.0, `gpt-5.5` pin | Tier 2 unavailable; codex rows in the policy stay dormant. Everything else works. |
 | [Ollama](https://ollama.com) + models per [LOCAL_MODELS](templates/LOCAL_MODELS.md) | Tier 3 | v0.24+ (MLX); qwen3.5 35B wants ~24GB+ free unified memory, the ≤7B rows run almost anywhere | Tier 3 unavailable; llocal rows stay dormant. |
