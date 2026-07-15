@@ -17,7 +17,7 @@ Probe capabilities; decide the target tier. Nothing here writes.
 | # | Probe | Command | Interpreting the output |
 |---|---|---|---|
 | 1 | Claude Code home | `test -d ~/.claude && echo ok` | `ok` → proceed. Anything else → you are not on a Claude Code host; Tier 0 only. |
-| 2 | U-ID plan workflow | Check your available skills for `ce-plan` (compound-engineering plugin). | Present → Tier 1 possible. Absent → Tier 1 still installs, but routing has nothing to consume until a U-ID plan workflow exists; say so in the report. |
+| 2 | U-ID plan workflow (optional) | Check your available skills for `ce-plan` (compound-engineering plugin). | Present → routing consumes its U-ID'd plans directly. Absent → still fine: route-plan mints U-IDs from an ID-less TODO/tasklist/pasted plan, so Tier 1 is fully usable; note in the report that minting is the input path. |
 | 3 | Verification discipline | Check your available skills for `verification-before-completion` (superpowers plugin). | Absent is non-blocking — note in the report that the re-check gate has no enforcement backstop. |
 | 4 | Python | `python3 --version` | 3.9+ → ok. |
 | 5 | git worktrees | `git --version` | Any modern git → ok (Tier 2 scrub path). |
@@ -104,6 +104,8 @@ grep -c 'MODEL ROUTER START' ~/.claude/CLAUDE.md        # expect: 1  (exactly �
 ```
 
 **4c. Routing smoke test (Tier 1) — the load-bearing check.** Perform the route-plan procedure (as installed at `~/.claude/skills/route-plan/SKILL.md`) against the bundled fixture plan `fixtures/sample-plan/plan.md`, writing the manifest to a scratch directory — not into this repo. Then compare your manifest's `## Assignments` against `fixtures/sample-plan/expected-routing.md`: **the executor per U-ID must match** (reasons may be worded differently). A mismatch means the policy or skill didn't install correctly — diagnose before reporting.
+
+**4c-bis. Minting smoke test (Tier 1) — verifies the ID-less input path.** Copy `fixtures/todo-plan/todo.md` to a scratch file first (leave the repo fixture ID-less for future runs), then run the route-plan procedure against that scratch copy — it has **no** `### U<N>.` headings. route-plan must mint `[U<N>]` markers (writing them back to the scratch copy on consent) and produce a manifest matching `fixtures/todo-plan/expected-routing.md` on **executor AND discipline label per U-ID**. The three assertions there — minting happened, full/bare labels correct, and no bare unit on a write-worker — must all hold. A bare unit routed to codex-implementer or llocal-batch is a fail.
 
 **4d. Codex lane (Tier 2):** `command -v codex` and re-confirm the config pin (probe 7). Do **not** run a live dispatch as part of setup.
 

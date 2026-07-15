@@ -12,6 +12,7 @@
 | 4 | Evidence rules | What counts as proof (outcomes) vs suggestion (research). |
 | 5 | Drift log | Append-only record of execution deviating from assignments. |
 | 6 | Outcome-line grammar | The data contract every executor's completion line follows. See [outcome-ledger.md](outcome-ledger.md). |
+| 7 | Gate-iteration protocol | What the coordinator may do with review-gate feedback: correction vs addition, propose-confirm-dispatch. |
 
 ## §2 — task shapes, not task topics
 
@@ -42,6 +43,10 @@ Before any outcomes exist, seed the table from **demand evidence**: retro-route 
 ## §5 — drift as first-class data
 
 When execution deviates from an assignment — circuit-breaker fallback, worker unavailable, coordinator override — a line goes in the drift log with rationale. The flywheel reads drift alongside outcomes: several entries citing the same rationale (say, repeated latency-cited overrides) is **one rule-change proposal**, not N cell tweaks. Drift you don't record is learning you don't get.
+
+## §7 — gate iteration is a decision, not a reflex
+
+A review gate is the user's decision point, so feedback from it is not self-authorizing. §7 forces a line between two things that are easy to conflate: a **correction** (feedback that changes only how a unit meets its *existing* goal/files/verify) stays inside that unit — it inherits the unit's routing and rides as fix rounds on its outcome line. An **addition** (a new deliverable, goal, or surface) is new scope — it needs explicit acceptance and lands as a route-plan mini-pass row or a `## Follow-ons` manifest entry, never riding an existing unit's dispatch. The classification test keys on the unit's spec, not the coordinator's discretion, and the coordinator always **proposes → confirms → dispatches** rather than dispatching remediation in the turn it proposes it. Note the deliberate boundary with §5: a follow-on is *backlog*, not a routing *deviation*, so it stays out of the drift log to keep the flywheel's signal clean.
 
 ## Editing rules
 

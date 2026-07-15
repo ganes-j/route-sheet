@@ -109,3 +109,23 @@ U5 · llocal:qwen3.5 · PASS · re-check spot-checked 12/12 items green · 1 fix
 U3 · haiku-scout · PASS · re-check n/a n/a · 0 fix rounds · na · 2026-07-21
 U4 · codex-implementer · FALLBACK · re-check `pnpm build` red · 0 fix rounds · 01JXYZ…session · 2026-07-22
 ```
+
+---
+
+## 7. Gate-iteration protocol (what the coordinator may do with review-gate feedback)
+
+When a plan defines a review gate (a checkpoint where the user reviews a unit's output before later units proceed) and that gate produces feedback, this section governs what happens next. It closes a gap that let feedback be treated as its own authorization: the coordinator dispatching remediation in the same turn it proposed it, with no line between fixing a unit and adding new scope.
+
+**7.1 Classify each feedback item — the test keys on the unit's own spec.**
+- **Correction** — the feedback changes only *how a unit meets its existing goal / files / verify*. It stays inside that unit's scope.
+- **Addition** — the feedback adds a *new deliverable, goal, or surface not in any unit's spec*.
+- The coordinator applies this test and **states its classification** as part of the confirm beat (7.3); the user can override. The test is mechanical on purpose — "it came up at the gate" does not make it a correction, and net-new work is never smuggled in as "iteration."
+
+**7.2 Corrections inherit; additions get a row.**
+- A **correction** inherits its unit's existing executor assignment and rides as additional **fix rounds** on that unit's outcome line (§6). The unit's assignment covers its own iteration — this is the part that is already coherent.
+- An **addition** never rides an existing unit's dispatch. On explicit acceptance it lands as either (a) a **new manifest row** via a route-plan mini-pass (next highest sequential U-ID, one new Assignments row, merge-never-clobber — see the route-plan skill), or (b) a **logged follow-on** for later. The coordinator proposes which; the user picks. A logged follow-on goes in the manifest's `## Follow-ons` section — **not** the §5 drift log (§5 feeds the flywheel's cell-update proposals; a deferred addition is backlog, not a routing deviation, and would pollute that signal).
+
+**7.3 Propose-confirm-dispatch — always.**
+- Gate feedback is never self-authorizing. The coordinator **proposes** (classification + the remediation + its executor), waits for an explicit **go**, then **dispatches**. This holds even for in-scope corrections: the correction rides the unit's routing, but the *dispatch* still needs the confirm beat. Propose-and-dispatch in a single turn is the prohibited pattern.
+
+Outcome lines for gate iterations follow §6 unchanged: a correction adds fix rounds to the existing unit's line; an accepted addition that becomes a new row gets its own line.
