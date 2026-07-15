@@ -50,7 +50,7 @@ def catalog_state(path, today=None, default_days=DEFAULT_STALENESS_DAYS) -> dict
 
     frontmatter = {}
     try:
-        with open(path, "r", encoding="utf-8") as catalog:
+        with open(path, "r", encoding="utf-8-sig") as catalog:
             frontmatter = parse_frontmatter(catalog.read())
     except (OSError, UnicodeError):
         pass
@@ -113,7 +113,18 @@ def check_catalogs(
     if base_dir is None:
         base_dir = os.environ.get("MODELS_DIR")
         if base_dir is None:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+            here = os.path.dirname(os.path.abspath(__file__))
+            sibling = os.path.abspath(os.path.join(here, "..", "templates"))
+            # Flat install (~/.claude): catalogs sit beside the helper. Repo layout:
+            # helper in bin/, catalogs in the sibling templates/. Prefer whichever
+            # actually holds the catalogs so `python3 bin/model_staleness.py` works
+            # from a fresh clone without --dir.
+            if (not any(os.path.exists(os.path.join(here, n)) for n in names)
+                    and os.path.isdir(sibling)
+                    and any(os.path.exists(os.path.join(sibling, n)) for n in names)):
+                base_dir = sibling
+            else:
+                base_dir = here
     return [
         catalog_state(
             os.path.join(base_dir, name),
@@ -129,7 +140,7 @@ _EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "none")
 
 def _read_text(path):
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, "r", encoding="utf-8-sig") as handle:
             return handle.read()
     except (OSError, UnicodeError):
         return None
@@ -154,23 +165,27 @@ def _parse_config_pin(text):
     if m:
         out["effort"] = m.group(1)
     comment = "\n".join(ln for ln in text.splitlines() if ln.lstrip().startswith("#"))
-    cm = re.search(r"model\s+(gpt[\w.\-]*)", comment)
+    cm = re.search(r"\bmodel\s+(gpt[\w.\-]*)", comment)
     if cm:
         out["comment_model"] = cm.group(1)
-    ce = re.search(r"effort\s+(" + "|".join(_EFFORTS) + r")\b", comment)
+    ce = re.search(r"\beffort\s+(" + "|".join(_EFFORTS) + r")\b", comment)
     if ce:
         out["comment_effort"] = ce.group(1)
     return out
 
 
 def _parse_dispatch_docstring(text):
-    out = {"model": None, "effort": None}
+    # The live codex-dispatch doc-string says "currently `X`, effort `Y`"; the
+    # public route-sheet template says "e.g. `X`, effort `Y`". Match either and
+    # capture the prefix so the proposed fix preserves the file's own wording.
+    out = {"model": None, "effort": None, "prefix": None}
     if not text:
         return out
-    m = re.search(r"currently\s+`([^`]+)`,\s*effort\s+`([^`]+)`", text)
+    m = re.search(r"\b(currently|e\.g\.)\s+`([^`]+)`,\s*effort\s+`([^`]+)`", text)
     if m:
-        out["model"] = m.group(1)
-        out["effort"] = m.group(2)
+        out["prefix"] = m.group(1)
+        out["model"] = m.group(2)
+        out["effort"] = m.group(3)
     return out
 
 
@@ -284,11 +299,12 @@ def codex_drift(config_path=None, skill_path=None, catalog_path=None):
              config_path, "effort %s" % pin["comment_effort"], "effort %s" % pin["effort"])
 
     if doc["model"] and doc["effort"] and (doc["model"] != pin["model"] or doc["effort"] != pin["effort"]):
+        pfx = doc["prefix"]
         flag("dispatch-docstring", "model+effort",
              "%s/%s" % (doc["model"], doc["effort"]),
              "%s/%s" % (pin["model"], pin["effort"]), skill_path,
-             "currently `%s`, effort `%s`" % (doc["model"], doc["effort"]),
-             "currently `%s`, effort `%s`" % (pin["model"], pin["effort"]))
+             "%s `%s`, effort `%s`" % (pfx, doc["model"], doc["effort"]),
+             "%s `%s`, effort `%s`" % (pfx, pin["model"], pin["effort"]))
 
     if cat["record_model"] and cat["record_model"] != pin["model"]:
         flag("catalog-record", "model", cat["record_model"], pin["model"], catalog_path,

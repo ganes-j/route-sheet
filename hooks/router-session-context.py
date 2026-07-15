@@ -32,9 +32,13 @@ else:
     # Passive model-catalog staleness status — a status line per stale catalog and a
     # "not yet initialized" line per absent one. Never an offer, never blocks; the
     # refresh offer lives at /ce-plan (route-plan). model_staleness.py is resolved
-    # relative to this hook's own directory (both live under ~/.claude once installed).
+    # relative to this hook's own directory so it works unchanged in the public mirror.
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        hook_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, hook_dir)
+        repo_bin = os.path.abspath(os.path.join(hook_dir, "..", "bin"))
+        if os.path.isdir(repo_bin):
+            sys.path.insert(0, repo_bin)
         import model_staleness
 
         lines = [s["line"] for s in model_staleness.check_catalogs() if s.get("line")]
