@@ -6,7 +6,7 @@ route-sheet is a **plan-time executor-routing layer** for agentic coding. It sit
 
 ```mermaid
 flowchart TD
-    A["/ce-plan\nplan with U-ID'd implementation units"] --> B["route-plan skill\nconsults ROUTING_POLICY.md"]
+    A["U-ID'd plan (/ce-plan)\nOR ID-less input\n(TODO / tasklist / pasted)"] --> B["route-plan skill\nmints IDs if none;\nconsults ROUTING_POLICY.md"]
     B --> C["sidecar routing manifest\n(plan-basename)-routing.md\napproved WITH the plan"]
     C --> D["/ce-work dispatch\n(default-binding)"]
     D --> E1["codex-dispatch\ncodex exec + guards"]
@@ -47,8 +47,8 @@ Plan: <path> · Policy: ROUTING_POLICY.md @ <date>
 Mode: gated · Coordinator: <active session model>
 
 ## Assignments
-- U1 → coordinator — <reason> — load-bearing check: <cmd or n/a>
-- U2 → codex-implementer — frozen-spec impl, dev-grade repo — load-bearing check: `pnpm test parser`
+- U1 → coordinator [full] — <reason> — load-bearing check: <cmd or n/a>
+- U2 → codex-implementer [full] — frozen-spec impl, dev-grade repo — load-bearing check: `pnpm test parser`
 
 ## Execution log
 U2 · codex-implementer · PASS · re-check `pnpm test parser` green · 0 fix rounds · <session-id> · 2026-07-20
@@ -56,7 +56,11 @@ U2 · codex-implementer · PASS · re-check `pnpm test parser` green · 0 fix ro
 
 A filled example lives at [templates/example-routing-manifest.md](../templates/example-routing-manifest.md). Re-runs **merge, never clobber**: deepening a plan adds assignments for new U-IDs; existing entries and the execution log are preserved verbatim.
 
+**Minting for ID-less input.** When the input has no `### U<N>.` headings — a TODO list, an issue tasklist, a pasted plan — route-plan mints stable `[U<N>]` markers and (behind a consent gate) writes them back into the source, so re-runs stay stable. This is what makes the compound-engineering plugin *recommended, not required*: any structured input is routable. Each assignment carries a **discipline label** — `[full]` (goal + verify command present) or `[bare]` (a thin unit with no verify command). A bare unit can never be assigned to a write-worker, because the orchestrator re-check would have no command to run against it — so weak input produces a visibly hedged manifest, not a confidently delegated one.
+
 **Dispatch is default-binding.** At execution, running a manifest-assigned unit inline without logging an override is treated as a verification-gate miss — deviations go to the manifest execution log plus the policy's drift log (§5) with rationale. The fallback ladder for a missing manifest or unrouted U-ID: work inline, note the gap, offer a route-plan run. Never improvise routing.
+
+**Gate iteration.** When a plan defines a review gate and it produces feedback, the policy's gate-iteration protocol ([routing-policy-spec.md](routing-policy-spec.md) §7) governs the response: feedback is classified against the reviewed unit's own spec — a *correction* (changes how the unit meets its existing goal/files/verify) inherits that unit's routing and rides as fix rounds; an *addition* (new deliverable/goal/surface) requires explicit acceptance and lands as a route-plan mini-pass row or a `## Follow-ons` entry, never riding an existing unit's dispatch. Gate feedback is never self-authorizing: propose → confirm → dispatch, always.
 
 ## Lane A vs Lane B
 
