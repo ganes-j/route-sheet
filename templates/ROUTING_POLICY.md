@@ -60,6 +60,7 @@ Each cell: `state (n=X: breakdown, last YYYY-MM-DD)` — e.g. `✅ (n=4: 3 clean
 - **`❓ → ✅`** requires **2+ clean outcomes** (routed, survived the coordinator re-check, ≤1 fix round).
 - **`✅ → ❌`** requires a **pattern** — 2–3 consecutive failures or a structural cause. Never flip on a single bad run (one failure is often a bad spec, not a bad executor).
 - Increments and date stamps apply silently; **state changes (`✅`↔`❌`, new rows) need the maintainer's sign-off.**
+- **Two authorization paths — R0 gates only the automated one.** A flip lands either via the **router-flywheel's proposal** (stays **R0-gated**: dry-run until the routing step has fired unprompted on 3 consecutive real plans — the "don't auto-learn until it's proven used" gate) **or** via the **maintainer's direct sign-off** on the 2+ clean outcomes above, which is **not** R0-gated. Cell *correctness* (is this executor good at this shape?) is independent of *adoption* (is the router used unprompted?); R0 governs the learning automation, not the maintainer's own evidence review. A bake-off that banks 2 clean wins can flip **now** on sign-off, even at R0 0/3 — the flywheel just can't propose it yet.
 
 ### Bake-off window — how a `❓` cell earns its verdict (the exploration budget)
 
