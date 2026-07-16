@@ -61,6 +61,18 @@ Each cell: `state (n=X: breakdown, last YYYY-MM-DD)` — e.g. `✅ (n=4: 3 clean
 - **`✅ → ❌`** requires a **pattern** — 2–3 consecutive failures or a structural cause. Never flip on a single bad run (one failure is often a bad spec, not a bad executor).
 - Increments and date stamps apply silently; **state changes (`✅`↔`❌`, new rows) need the maintainer's sign-off.**
 
+### Bake-off window — how a `❓` cell earns its verdict (the exploration budget)
+
+A `❓` is **not** a reason to fall back to the coordinator — it's a standing invitation to gather 2–3 real outcomes and resolve the cell fast. The coordinator re-check bounds the downside (a wrong outsource is caught and redone, never shipped), so exploration is cheap: the default for a **verifiable, constraint-clean, cleanly-shape-matched** unit is to route it to the row's candidate executor as a **bake-off trial**, not to keep it in-house. `❓` means *run the bake-off*, not *play it safe*.
+
+- **The re-check is the taster.** A trial **wins** = PASS, survived the coordinator re-check, ≤1 fix round; **loses** = re-check red / FALLBACK / >1 fix round. A **literal A/B** (candidate *and* coordinator on the same unit, compare) is the higher-fidelity option, reserved for expensive shapes where one head-to-head beats 3 serial trials.
+- **Window = 2–3 trials per shape, early-stop.** 2 wins → `❓→✅`, close the window (don't keep testing a proven cell). 2 losses → `❓→❌` lean (after a look at bad-spec-vs-bad-fit — §3's "pattern, not one run"). 1–1 → the 3rd breaks the tie. The flip still needs the maintainer's sign-off.
+- **Cost-aware — 2–3 is a ceiling, not a quota.** Cheap shapes (bulk extraction, small frozen-spec, where-is-X reads) spend the full window on real matching units freely. Expensive shapes (huge-context sweeps, large impls, latency-heavy Codex on a critical path) use the **smallest genuine representative unit**, or **one A/B**, or **defer** the bake-off to the next low-stakes matching unit — never force an expensive trial onto a critical path.
+- **Tag it.** A bake-off dispatch is logged as an **exploration** trial (manifest / ad-hoc outcome ledger), so a loss reads as *data*, not a failure to explain away.
+- **The window never opens for** (constraint layer + discipline floor still win): never-delegate shapes, PII / prod-credential-blocked units, and **bare units with no verify command** — no re-check = no taster = no safe bake-off. Route-out-at-`❓` applies only to verifiable, constraint-clean, shape-matched units.
+
+**Shipping router changes (fast-track).** Policy edits, catalog mirrors, proving-outcome logs, and cell flips ship as PRs to the ruleset-protected `main` (audit trail) on a **fast track — no required review, no wait for a separate merge request**: the coordinator opens the PR and self-merges (squash) immediately. The `main` ruleset enforces the flow (require-PR + no force-push/deletion) without gating on review or thread-resolution; advisory bot review may comment but never blocks. The one carve-out: a **cell state-change** (`❓→✅` / `✅→❌`) still gets the maintainer's §3 decision sign-off — surfaced for a yes — after which its flip PR fast-tracks like the rest.
+
 ---
 
 ## 4. Evidence rules
