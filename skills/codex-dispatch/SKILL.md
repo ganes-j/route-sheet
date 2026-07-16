@@ -84,6 +84,7 @@ Never trust Codex's own "done." After the run:
    `U<N> · codex-implementer · PASS · re-check <cmd> <green|red> · <N> fix rounds · <session-id> · <YYYY-MM-DD>`
    The unit is not done until this line exists.
 5. **On fail** (re-check red, empty diff, out-of-scope touch, or hang) → revert (`git -C "$dispatch_dir" checkout -- .`; if a scrub worktree, `git -C "$repo" worktree remove --force "$wt"` and drop any integration), increment the consecutive-failure counter, and the **coordinator implements the unit directly**. Emit a `FALLBACK` outcome line (§6 grammar) in the manifest execution log AND append a drift line to `ROUTING_POLICY.md` §5 with the rationale (the two are paired).
+6. **Assignment scope (gate iterations).** A unit's assignment covers its own fix/iteration rounds for **in-scope corrections only** (`ROUTING_POLICY.md` §7). Re-dispatching after a correction — feedback that changes how the unit meets its *existing* goal/files/verify — is still this unit's dispatch, absorbed as additional fix rounds on its outcome line. A gate-surfaced **scope addition** is NOT covered: it takes the §7 path (explicit acceptance + a route-plan mini-pass row or a `## Follow-ons` entry), never extra fix rounds on this unit. Never dispatch remediation from gate feedback without the §7 propose-confirm-dispatch beat.
 
 ## 5. Circuit breaker
 
