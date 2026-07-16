@@ -2,8 +2,10 @@
 """Model-router SessionStart context injector.
 
 Emits routing-ACTIVE or routing-DISABLED context depending on the
-~/.claude/.router-off sentinel file. Wired in via a SessionStart hook in
-settings.json.
+~/.claude/.router-off sentinel file. When ACTIVE, also appends a passive
+one-line model-catalog staleness status — informational only; the refresh
+is offered at /ce-plan, never here. Never blocks; a helper failure degrades
+silently (the settings.json wrapper adds `2>/dev/null || true`).
 
 REVERT: delete this file AND remove the SessionStart command in
 settings.json that calls it (look for router-session-context.py).
@@ -11,6 +13,7 @@ SOFT-DISABLE (no revert needed): touch ~/.claude/.router-off
 """
 import json
 import os
+import sys
 
 sentinel = os.path.expanduser("~/.claude/.router-off")
 if os.path.exists(sentinel):
@@ -26,4 +29,25 @@ else:
         "The constraint layer (PII-never-Codex, prod-credential block) always wins over task-shape routing. "
         "Disable anytime with: touch ~/.claude/.router-off"
     )
+    # Passive model-catalog staleness status — a status line per stale catalog and a
+    # "not yet initialized" line per absent one. Never an offer, never blocks; the
+    # refresh offer lives at /ce-plan (route-plan). model_staleness.py is resolved
+    # relative to this hook's own directory so it works unchanged in the public mirror.
+    try:
+        hook_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, hook_dir)
+        repo_bin = os.path.abspath(os.path.join(hook_dir, "..", "bin"))
+        if os.path.isdir(repo_bin):
+            sys.path.insert(0, repo_bin)
+        import model_staleness
+
+        lines = [s["line"] for s in model_staleness.check_catalogs() if s.get("line")]
+        if lines:
+            ctx = ctx + (
+                "\n\nMODEL CATALOGS (passive status — a refresh is offered at /ce-plan, not here): "
+                + " · ".join(lines)
+            )
+    except Exception:
+        pass
+
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}))

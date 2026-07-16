@@ -9,7 +9,7 @@ Hand one implementation unit to Codex, then verify its output yourself. Codex ou
 
 **Kill switch:** if `~/.claude/.router-off` exists, do not dispatch — work the unit inline. (The SessionStart hook also injects a disable directive; check the file here regardless.)
 
-Model + reasoning effort inherit from `~/.codex/config.toml` (e.g. `gpt-5.5`, effort `high`). Do NOT pass `-m` or `-c model_reasoning_effort=…` — config.toml is the single source of truth.
+Model + reasoning effort inherit from `~/.codex/config.toml` (e.g. `gpt-5.6-sol`, effort `medium`). Do NOT pass `-m` or `-c model_reasoning_effort=…` — config.toml is the single source of truth.
 
 ## 1. Pre-dispatch checks (ordered — stop at the first failure)
 
