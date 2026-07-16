@@ -16,6 +16,7 @@ Turn real router outcomes into a better policy. `route-plan` decides and `codex-
 2. **R0 gate (dry-run vs live).** Read `~/.claude/ROUTER_STATUS.md` for the `R0 status:` line.
    - **R0 not yet PASSED** → run in **dry-run**: do steps 3–6 and *report* what you would propose, but write nothing to the policy. State the R0 status (e.g. "R0 pending — 1/3 unprompted manifests; flywheel dry-run only"). This lets the mechanism be exercised during the proving period without mutating the policy.
    - **R0 PASSED** → live: proposals can be applied per step 6.
+   - **Manual flips are a separate, non-R0-gated path.** R0 gates only *this skill's* automated proposals. The maintainer may sign off a `❓→✅` flip directly on 2+ clean outcomes (`ROUTING_POLICY.md` §3) at any R0 state — the bake-off / proving campaign relies on this, so cells flip on real evidence before organic R0.
 
 3. **Gather outcomes.**
    - Manifests: `~/.claude/plans/*-routing.md` and, when a repo is in play, `<repo>/docs/plans/*-routing.md`.
