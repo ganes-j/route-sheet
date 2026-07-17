@@ -1,0 +1,27 @@
+{
+  "name": "route-sheet",
+  "version": "0.1.0",
+  "description": "Plan-time executor routing for Claude Code: route each unit of multi-unit work to Codex, a local model, a cheap Claude tier, or the coordinator, per a constraint-aware policy.",
+  "author": {
+    "name": "Jesse Ganes"
+  },
+  "homepage": "https://github.com/ganes-j/route-sheet",
+  "repository": "https://github.com/ganes-j/route-sheet",
+  "license": "MIT",
+  "keywords": [
+    "model-router",
+    "routing",
+    "executor-routing",
+    "codex",
+    "llm-orchestration"
+  ],
+  "userConfig": {
+    "enable_session_status": {
+      "type": "boolean",
+      "title": "Enable the router session-status line",
+      "description": "Inject a one-line Model Router status (active/disabled plus model-catalog staleness) at session start. Off by default; the router's skills work whether or not this is on.",
+      "default": false
+    }
+  },
+  "hooks": "./hooks/hooks.json"
+}
