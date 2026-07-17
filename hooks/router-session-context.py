@@ -10,10 +10,19 @@ silently (the settings.json wrapper adds `2>/dev/null || true`).
 REVERT: delete this file AND remove the SessionStart command in
 settings.json that calls it (look for router-session-context.py).
 SOFT-DISABLE (no revert needed): touch ~/.claude/.router-off
+PLUGIN INSTALL: dormant until the `enable_session_status` option is enabled
+(Claude Code exports it as CLAUDE_PLUGIN_OPTION_ENABLE_SESSION_STATUS); the
+live ~/.claude copy is wired via settings.json and has no such gate.
 """
 import json
 import os
 import sys
+
+# Plugin opt-in gate (packaging layer; absent from the live ~/.claude hook).
+# Empty stdout = nothing injected. .router-off below still governs
+# ACTIVE-vs-DISABLED once opted in.
+if os.environ.get("CLAUDE_PLUGIN_OPTION_ENABLE_SESSION_STATUS") != "true":
+    sys.exit(0)
 
 sentinel = os.path.expanduser("~/.claude/.router-off")
 if os.path.exists(sentinel):

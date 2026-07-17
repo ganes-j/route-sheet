@@ -1,0 +1,28 @@
+{
+  "name": "route-sheet",
+  "owner": {
+    "name": "Jesse Ganes"
+  },
+  "metadata": {
+    "description": "The Model Router — plan-time executor routing for Claude Code.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "route-sheet",
+      "description": "Plan-time executor routing: assign each unit of multi-unit work to the best-suited executor (Codex, a local model, a cheap Claude tier, or the coordinator) behind a constraint layer, a proving campaign, and a self-improving flywheel.",
+      "author": {
+        "name": "Jesse Ganes"
+      },
+      "homepage": "https://github.com/ganes-j/route-sheet",
+      "tags": [
+        "model-router",
+        "routing",
+        "executor-routing",
+        "codex",
+        "workflow-automation"
+      ],
+      "source": "./"
+    }
+  ]
+}
