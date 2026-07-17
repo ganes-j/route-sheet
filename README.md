@@ -29,6 +29,8 @@ The manifest is approved *with* the plan. At execution, dispatch follows it: Cod
 
 The full picture, with a diagram: [docs/architecture.md](docs/architecture.md).
 
+New to the vocabulary — coordinator, task-shape cell, bake-off window, R0 gate? [CONCEPTS.md](CONCEPTS.md) is a one-screen glossary of the coined terms.
+
 ## Plan-time vs runtime
 
 Everything else in this space — [claude-code-router](https://github.com/musistudio/claude-code-router), per-inference smart routers, delegation plugins, enterprise AI gateways — decides per request, at runtime, invisibly. That's the right layer for cost optimization. It is the wrong layer for governance, because by the time a request exists, the data is already in the prompt and nobody reviewed the decision.
@@ -89,6 +91,7 @@ fixtures/      sample plan + expected manifest (SETUP.md's smoke test)
 scripts/       leak-check.sh — pre-publish sanitization gate (blocklist stays local, gitignored)
 SETUP.md       agent-executable install runbook (tiered, idempotent, verified)
 AGENTS.md      orientation for agents consuming this repo
+CONCEPTS.md    glossary of the router's coined terms
 ```
 
 ## Install
