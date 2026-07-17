@@ -22,6 +22,5 @@
       "description": "Inject a one-line Model Router status (active/disabled plus model-catalog staleness) at session start. Off by default; the router's skills work whether or not this is on.",
       "default": false
     }
-  },
-  "hooks": "./hooks/hooks.json"
+  }
 }

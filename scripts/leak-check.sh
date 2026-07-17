@@ -3,7 +3,8 @@
 #
 # Scans every tracked file for (a) structural leaks and (b) your private term
 # blocklist. The blocklist lives in scripts/leak-terms.local.txt (gitignored,
-# one term per line, optional "term<TAB>ALLOW:<path>" to allowlist a file) —
+# one term per line, optional "term<TAB>ALLOW:<path>[,<path>...]" to allowlist
+# one or more files) —
 # committing the list would itself disclose what you sanitized away.
 #
 # Exit 0 = clean. Exit 1 = hits printed. Run before every push of a repo that
@@ -37,7 +38,10 @@ else
   while IFS=$'\t' read -r term allow; do
     [ -z "$term" ] && continue; case "$term" in \#*) continue;; esac
     scan="$files"
-    if [ -n "${allow:-}" ]; then scan=$(echo "$files" | grep -v "^${allow#ALLOW:}$" || true); fi
+    if [ -n "${allow:-}" ]; then
+      IFS=',' read -ra _allowed <<< "${allow#ALLOW:}"
+      for _p in "${_allowed[@]}"; do scan=$(echo "$scan" | grep -v "^${_p}$" || true); done
+    fi
     if hits=$(echo "$scan" | xargs grep -inl -- "$term" 2>/dev/null); then
       echo "TERM '$term' FOUND IN:"; echo "$hits"; fail=1
     fi
