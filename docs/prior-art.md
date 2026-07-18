@@ -11,6 +11,14 @@ The multi-model space is crowded. Almost all of it routes **per-request, at runt
 | [RouteLLM](https://github.com/lm-sys/routellm) / [Not Diamond](https://www.notdiamond.ai/) / [LiteLLM router](https://docs.litellm.ai/docs/routing) | Classifier- or gateway-based strong/weak model routing per query | API-level cost optimization; nothing task- or plan-shaped. |
 | Azure OpenAI **Model Router** | A first-party product feature routing across deployed models | Also why nothing should be named "model router." |
 
+## Live model-intelligence advisors
+
+The newest neighbor, and the closest to route-sheet's *catalog* layer rather than its router. These tell the agent *which model* to reach for; they don't route your plan or act on it.
+
+| Project | What it does | Difference from route-sheet |
+|---|---|---|
+| [OpenRouter MCP](https://openrouter.ai/mcp) (2026) | Remote MCP giving the agent live model *intelligence* — a 400+ model catalog, third-party benchmarks (Artificial Analysis intelligence, Design Arena ELO), per-provider pricing/latency, usage/trending rankings, and docs search — plus billable test-inference (`send-message`, `generate-image`). Read-only intel is free (it proxies the public OpenRouter API; no card, $0 balance); only the inference tools bill, and those are capped. | Advises *which model* and lets the agent test one — it doesn't route a plan's units, hold a security policy, or record what ran where. It answers the factual question route-sheet delegates to its catalogs, so it **composes rather than competes**: route-sheet can consume it as a free factual-fetch + model-discovery source behind [`MODEL_REFRESH.md`](../templates/MODEL_REFRESH.md), keeping the plan-time routing, constraint layer, and ledger on top. Its pitch — "agents guess models from training data that's months old" — is the exact premise route-sheet's catalog layer was built for. (Distinct from OpenRouter's org **gateway**, below.) |
+
 ## Cross-agent delegation (Claude Code ↔ Codex)
 
 | Project | What it does | Difference |
