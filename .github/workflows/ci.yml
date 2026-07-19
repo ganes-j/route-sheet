@@ -24,3 +24,9 @@ jobs:
         run: python3 -m py_compile bin/model_staleness.py
       - name: Helper smoke test
         run: python3 bin/model_staleness.py --json
+      - name: OpenRouter helper syntax check
+        run: python3 -m py_compile bin/openrouter_facts.py
+      - name: OpenRouter helper unit tests
+        run: python3 -m unittest tests.test_openrouter_facts
+      - name: OpenRouter helper smoke test
+        run: python3 bin/openrouter_facts.py --json

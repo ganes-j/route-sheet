@@ -136,6 +136,19 @@ Never round a partial install up. The report is the deliverable.
 
 ---
 
+## Optional — OpenRouter model intelligence (read-only)
+
+Enhances the model-awareness refresh ([templates/MODEL_REFRESH.md](templates/MODEL_REFRESH.md)) with live OpenRouter data. Read-only and independent of the tiers — skip it and the refresh uses its existing sources.
+
+- **Factual (no setup, no auth):** `bin/openrouter_facts.py` reads OpenRouter's public `/api/v1/models` over HTTPS. Nothing to install or authenticate — it needs only network.
+- **Discovery (optional, needs the MCP):** connect the OpenRouter MCP so a refresh can read live rankings for model discovery. Create a free OpenRouter account, then add the remote MCP:
+  ```bash
+  claude mcp add --transport http openrouter https://mcp.openrouter.ai/mcp
+  ```
+  First use runs an OAuth flow that mints a **read-only** key (7-day expiry, revocable, separate from your other keys). The refresh calls only read-only tools. If the key expires, factual refresh still works (it uses the auth-free public REST path) and discovery falls back silently.
+
+---
+
 ## Uninstall / disable
 
 - **Soft-disable (reversible, instant):** `touch ~/.claude/.router-off`. Every skill declines; the hook announces DISABLED. Re-enable: `rm ~/.claude/.router-off`.
