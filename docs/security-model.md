@@ -72,6 +72,10 @@ Some work stays on the coordinator regardless of shape match:
 
 Cross-vendor output is *more* untrusted than a same-model subagent: different model, own sandbox, hidden reasoning. So no worker's "done" is accepted. The coordinator (1) reads the actual diff, (2) runs a scope check — only the unit's declared files may change; an out-of-scope touch is treated as failure and reverted, which doubles as a prompt-injection guard — and (3) re-runs the unit's load-bearing check itself against the real environment. Only then does the outcome line get written. A circuit breaker (3 consecutive worker failures → disable that lane for the rest of the run) bounds the blast radius of a bad day.
 
+## Read-only external intelligence (OpenRouter)
+
+Separate from delegation: route-sheet's optional OpenRouter integration ([templates/MODEL_REFRESH.md](../templates/MODEL_REFRESH.md)) only *reads* — the public model catalog over HTTPS, and for discovery the MCP's read-only tools. It never calls OpenRouter's inference tools and never sends repo content or a task prompt. So it sits outside the constraint layer above (which governs sending *work* to an executor): the only thing that leaves is an HTTP request for a public catalog. The factual path needs no credential; the discovery MCP uses a read-only, short-lived key.
+
 ## What this model does not cover
 
 Honest edges: it trusts `git check-ignore` and the tracked-file model (a *tracked* credential defeats the scrub — that's the still-dirty hard-skip); the host scan reads `.env`/config shapes, not every conceivable secret format; and it governs *delegation*, not the coordinator's own access — the main agent still holds whatever your session holds. Extend the deny-list and scan patterns as you encounter new shapes.
