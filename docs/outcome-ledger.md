@@ -41,3 +41,17 @@ U4 · codex-implementer · FALLBACK · re-check `pnpm build` red · 0 fix rounds
 ## The ledger as audit trail
 
 Beyond learning, the ledger answers questions no runtime router can: *what ran where, on whose say-so, verified how?* Each manifest is a signed-off routing decision; each outcome line is the verification receipt. If a delegation ever goes wrong, the trail from "assigned by policy §2 row X" to "re-check red, reverted, FALLBACK, drift-logged" is already written — in plain text, in your repo.
+
+## The maintainer's own results (not your starting state)
+
+The shipped table starts every cell at `❓` on purpose — your confidence has to come from *your* stack's outcomes, not mine. This section is the opposite end of that arc: what the ledger looks like after a real proving campaign, so you can see the mechanism actually resolve a cell rather than just trusting the rules describe something real.
+
+Two cells earned `✅` on my own stack, each by the exact rule the spec states — accumulated `PASS` lines with ≤1 fix round, surviving the coordinator re-check, signed off by hand:
+
+- **`impl-from-frozen-spec → codex-implementer`** flipped after **6 clean integrations** across several real build sessions (frozen-spec units — a data-layer helper, a schema regeneration, a token-hardening pass, a filtered-view feature, a logging/error-path hardening, an operational script). Every one dispatched into a credential-scrubbed worktree, came back, survived an independent re-run of its load-bearing check, and merged with 0–1 fix rounds. The single "fix round" in the set was in a generated *test fixture*, never in the implementation — which is exactly why the threshold counts fix rounds, not just PASS.
+
+- **`adversarial / second-opinion review → codex-scout`** flipped after **4 clean gate runs**. The load-bearing observation: on multiple sweeps the independent-model reviewer *reproduced real defects* — a concurrent-boot crash, a session-fixation hole, an integer-overflow, a broken personalization contract — and on the same sweeps a same-family reviewer caught defects the independent one missed. The two passes were **convergent on the worst bugs and complementary on the rest**. A single-model review, however good, is one distribution of blind spots; a second independent model is the cheapest way to cover a different one. Every finding was re-verified by the coordinator before it drove a change — the scout *proposes*, the re-check *confirms*.
+
+### What this is not
+
+It is **not** a reason to pre-flip your own table. Nothing here was measured on your machine, your models, or your work, so by the policy's own rule (*"external evidence suggests; only local outcomes verify"*) it can't flip a cell for you — it can only tell you the arc is real and worth walking. Route your first shape-matched, verifiable, constraint-clean unit *out* as a bake-off trial, let the coordinator re-check be the taster, and let your ledger earn its own `✅`.
