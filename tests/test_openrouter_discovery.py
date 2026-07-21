@@ -194,6 +194,9 @@ class DigestTests(unittest.TestCase):
         cand = next(c for c in digest["hosted"] if c["model_id"] == "gpt-9-super")
         self.assertIn("rival_tier", cand)
         self.assertIn("delta_coding_index", cand)
+        self.assertIn("delta_cost_per_mtok", cand)
+        # readable $/Mtok, not raw per-token float noise
+        self.assertEqual(cand["delta_cost_per_mtok"], round(cand["delta_cost_per_mtok"], 2))
 
     def test_hosted_riser_below_frontier_and_not_cheaper_collapsed(self):
         digest = disc.build_digest(

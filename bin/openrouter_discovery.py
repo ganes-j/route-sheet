@@ -189,8 +189,10 @@ def _gate_hosted(safe_id, vendor, bench_row, frontier):
         candidate["delta_coding_index"] = (
             round(coding - frontier["coding_index"], 3) if coding is not None else None
         )
-        candidate["delta_cost"] = (
-            price - frontier["price"]
+        # Per-token prices are tiny floats; express the delta in $/Mtok (the unit
+        # the catalogs use) and round so the emitted line reads cleanly.
+        candidate["delta_cost_per_mtok"] = (
+            round((price - frontier["price"]) * 1_000_000, 2)
             if price is not None and frontier["price"] is not None
             else None
         )
@@ -327,12 +329,14 @@ def _print_human(result):
     print("")
     print("HOSTED (benchmark-gated vs frontier):")
     for candidate in result.get("hosted", []):
+        cost = candidate.get("delta_cost_per_mtok")
+        cost_str = "n/a" if cost is None else "{:+g} $/Mtok".format(cost)
         print(
-            "  {id}\tvs {rival}\tcoding_delta={cd}\tcost_delta={xd}\t[{gate}]".format(
+            "  {id}\tvs {rival}\tcoding_delta={cd}\tcost_delta={cost}\t[{gate}]".format(
                 id=candidate["model_id"],
                 rival=candidate.get("rival_tier"),
                 cd=candidate.get("delta_coding_index"),
-                xd=candidate.get("delta_cost"),
+                cost=cost_str,
                 gate=candidate.get("gate", ""),
             )
         )
