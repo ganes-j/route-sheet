@@ -30,3 +30,9 @@ jobs:
         run: python3 -m unittest tests.test_openrouter_facts
       - name: OpenRouter helper smoke test
         run: python3 bin/openrouter_facts.py --json
+      - name: OpenRouter discovery helper syntax check
+        run: python3 -m py_compile bin/openrouter_discovery.py
+      - name: OpenRouter discovery helper unit tests
+        run: python3 -m unittest tests.test_openrouter_discovery
+      - name: OpenRouter discovery helper smoke test
+        run: printf '' | python3 bin/openrouter_discovery.py --json
