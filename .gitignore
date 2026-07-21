@@ -2,3 +2,8 @@
 *.bak
 scratch/
 scripts/leak-terms.local.txt
+__pycache__/
+*.pyc
+docs/brainstorms/
+docs/ideation/
+docs/plans/
