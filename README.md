@@ -45,6 +45,16 @@ The part I find most interesting is what this suggests about plan-execute loops 
 
 route-sheet inserts a dispatch layer between plan and execution. The plan says what to build; the manifest says who builds each piece; the re-check discipline says nothing merges on a worker's word alone; the outcome ledger says whether the assignments were any good. My hope is that plan-time routing becomes a native step in these loops — the U-ID'd plan is the seam, and any plan format that carries stable unit IDs could join the same way.
 
+## Using it with a different planner
+
+That last line is a promise, so here's the practical version. route-sheet keys on U-ID'd units, not on compound-engineering. The shipped CLAUDE.md glue just names the three moments with ce commands (`/ce-plan`, `/ce-work`, `/ce-compound`) because that's my daily driver — nothing in the machinery depends on them. Plan with [superpowers](https://github.com/obra/superpowers), another plugin, or by hand, and the seams are identical; you trigger them from your own workflow:
+
+- **Route** — after your planner writes the plan, run `route-plan` on the file. It mints stable U-IDs from an ID-less plan, so a superpowers plan or a pasted checklist routes fine; no ce-specific format is required.
+- **Execute** — the seam that needs care. The manifest is *data*, not a skill that fires itself: your execution step has to be told to read the sidecar manifest and dispatch each unit to its assigned executor, or it will run every unit on the default model and never consult the routing. The tie-break to state once: when the manifest assigns a unit to Codex or a local model, dispatch it there; your tool's own execution discipline still governs how the coordinator-assigned units run.
+- **Learn** — run the `router-flywheel` skill at whatever your retrospective step is (ce fires it at `/ce-compound`; trigger it yourself otherwise). It stays dry-run until the R0 gate passes either way.
+
+The constraint layer, the manifest, and the re-check discipline are all planner-independent — they operate on the plan and the manifest, not on how either was produced. (superpowers appears twice on purpose: it can be your *planner* here, and separately it's the recommended source of the re-check discipline the execute seam leans on — independent roles.)
+
 ## Maturity — read this before adopting
 
 This is a young system, published for the pattern more than the code. Concretely, as of July 2026:
@@ -73,7 +83,7 @@ You don't need the whole stack. Each tier is independently useful and independen
 |---|---|---|---|
 | [Claude Code](https://claude.com/claude-code) (skills, SessionStart hooks, settings.json) | Tier 1+ | July 2026 builds | The skills and hook have no host. The *documents* still transfer to any agent that reads markdown instructions. |
 | [compound-engineering plugin](https://github.com/EveryInc/compound-engineering-plugin) (`/ce-plan`, `/ce-work`, `/ce-compound`) | **Recommended**, Tier 1+ | v3.14.x | Gives you U-ID'd plans for free and the full plan→route→work→compound loop. Not required: route-plan mints stable IDs from an ID-less TODO/tasklist/pasted plan, so any structured input is routable — the plugin makes it nicer, not possible. |
-| [superpowers plugin](https://github.com/obra/superpowers) (verification-before-completion discipline) | Recommended, Tier 1+ | July 2026 | The re-check gate loses its enforcement backstop; you must supply the "paste real output before claiming done" discipline yourself. |
+| [superpowers plugin](https://github.com/obra/superpowers) (verification-before-completion discipline; also a viable planner — see [Using it with a different planner](#using-it-with-a-different-planner)) | Recommended, Tier 1+ | July 2026 | The re-check gate loses its enforcement backstop; you must supply the "paste real output before claiming done" discipline yourself. |
 | [Codex CLI](https://github.com/openai/codex) + ChatGPT plan auth + `~/.codex/config.toml` model pin | Tier 2 | 0.143.0, `gpt-5.5` pin | Tier 2 unavailable; codex rows in the policy stay dormant. Everything else works. |
 | [Ollama](https://ollama.com) + models per [LOCAL_MODELS](templates/LOCAL_MODELS.md) | Tier 3 | v0.24+ (MLX); qwen3.5 35B wants ~24GB+ free unified memory, the ≤7B rows run almost anywhere | Tier 3 unavailable; llocal rows stay dormant. |
 | Python 3 (stdlib only) | Tiers 1–3 | 3.9+ | `llocal` and the kill-switch hook don't run. No pip packages needed, ever. |
