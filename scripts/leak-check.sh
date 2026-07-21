@@ -13,7 +13,8 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 fail=0
-files=$(git ls-files | grep -v '^scripts/leak-check.sh$')
+files=$({ git ls-files; git ls-files --others --exclude-standard; } |
+  grep -v '^scripts/leak-check.sh$' | sort -u)
 
 echo "== structural checks =="
 # 1. Absolute home paths (machine-specific, often embed a username)
