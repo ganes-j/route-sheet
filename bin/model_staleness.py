@@ -359,11 +359,202 @@ def _codex_drift_cli(argv):
     return 0
 
 
+# Ollama IDs may be namespaced (`host/user/model`) and carry uppercase
+# (`...GGUF`, `Qwen/...`); allow `/` and mixed case so valid tags aren't dropped.
+_OLLAMA_TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?\Z")
+
+
+def _default_local_catalog():
+    """Path to LOCAL_MODELS.md across the repo (templates/) and flat/live layouts."""
+    base = os.environ.get("MODELS_DIR")
+    if base:
+        return os.path.join(base, "LOCAL_MODELS.md")
+    here = os.path.dirname(os.path.abspath(__file__))
+    sibling = os.path.abspath(os.path.join(here, "..", "templates"))
+    for directory in (here, sibling):
+        candidate = os.path.join(directory, "LOCAL_MODELS.md")
+        if os.path.exists(candidate):
+            return candidate
+    return os.path.join(here, "LOCAL_MODELS.md")
+
+
+def _looks_like_ollama_tag(token):
+    """A first-cell token is an Ollama model id, not a flag/path/prose token."""
+    return bool(token) and bool(_OLLAMA_TAG_RE.fullmatch(token))
+
+
+def _parse_listed_local_models(text):
+    """Model ids from the 'Local Model Inventory' table's first column only.
+
+    Keys on the first cell so backticked flags/paths in other cells
+    (`--workers`, `--num-predict`, `/api/chat`) are never mistaken for models,
+    and the separate 'Candidate Models' section is excluded by construction.
+    """
+    section = _catalog_section(text, "Local Model Inventory")
+    listed = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        first = stripped.strip("|").split("|", 1)[0].strip()
+        match = re.fullmatch(r"`([^`]+)`", first)
+        if not match:
+            continue
+        token = match.group(1).strip()
+        if _looks_like_ollama_tag(token) and token not in listed:
+            listed.append(token)
+    return listed
+
+
+def _normalize_ollama_tag(tag):
+    """Reconcile the one naming difference between the table and `ollama list`:
+    an implicit vs explicit `:latest`. Verified against real `ollama list` output
+    — Ollama tags and catalog rows otherwise share the same namespace, so no
+    version-reordering key (see openrouter naming-reconciliation) is needed here.
+    """
+    tag = tag.strip().lower()
+    if ":" not in tag:
+        tag = tag + ":latest"
+    return tag
+
+
+def _fetch_installed_models(host=None, timeout=5):
+    """Live installed model ids from Ollama's GET /api/tags."""
+    import urllib.request
+
+    base = host or os.environ.get("OLLAMA_HOST") or "http://localhost:11434"
+    if not base.startswith("http"):
+        base = "http://" + base
+    url = base.rstrip("/") + "/api/tags"
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return [m["name"] for m in data.get("models", []) if m.get("name")]
+
+
+def local_drift(catalog_path=None, installed=None, host=None, timeout=5):
+    """Detect drift between LOCAL_MODELS.md's installed inventory table and the
+    models actually installed in Ollama. Reports + proposes; NEVER writes.
+
+    `installed` is the live list of installed model ids (e.g. `llocal models
+    --names` / GET /api/tags); when None it is fetched live. Matching normalizes
+    an implicit/explicit `:latest`. Two drift directions are surfaced:
+    `missing_from_table` (pulled but undocumented → propose an add-row) and
+    `stale_in_table` (documented but no longer installed → propose verify/drop).
+    """
+    catalog_path = catalog_path or _default_local_catalog()
+    report = {
+        "status": "ok",
+        "installed": [],
+        "listed": [],
+        "missing_from_table": [],
+        "stale_in_table": [],
+        "proposed_edits": [],
+        "errors": [],
+    }
+
+    text = _read_text(catalog_path)
+    if text is None:
+        report["status"] = "parse_error"
+        report["errors"].append(
+            "LOCAL_MODELS.md: could not read %s" % catalog_path)
+        return report
+
+    # A missing inventory heading is a parse failure, not drift — otherwise a
+    # renamed/malformed catalog reports every installed model as undocumented.
+    if not any(ln.startswith("## ") and "local model inventory" in ln.lower()
+               for ln in text.splitlines()):
+        report["status"] = "parse_error"
+        report["errors"].append(
+            "LOCAL_MODELS.md: 'Local Model Inventory' section not found "
+            "— catalog malformed?")
+        return report
+
+    listed = _parse_listed_local_models(text)
+    report["listed"] = listed
+
+    if installed is None:
+        try:
+            installed = _fetch_installed_models(host=host, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - network/parse must not crash
+            report["status"] = "parse_error"
+            report["errors"].append(
+                "could not fetch installed models: %r" % exc)
+            return report
+    report["installed"] = list(installed)
+
+    listed_by_key = {_normalize_ollama_tag(t): t for t in listed}
+    installed_by_key = {_normalize_ollama_tag(t): t for t in installed}
+
+    for key, original in installed_by_key.items():
+        if key not in listed_by_key:
+            report["missing_from_table"].append(original)
+            report["proposed_edits"].append({
+                "file": catalog_path,
+                "action": "add-row",
+                "model": original,
+                "note": ("installed in Ollama but absent from the inventory "
+                         "table — add a row (Best for / Avoid / Size) and bump "
+                         "last_reconciled"),
+            })
+
+    for key, original in listed_by_key.items():
+        if key not in installed_by_key:
+            report["stale_in_table"].append(original)
+            report["proposed_edits"].append({
+                "file": catalog_path,
+                "action": "flag-stale",
+                "model": original,
+                "note": ("listed in the inventory table but not installed — "
+                         "verify it was removed, then drop the row or re-pull"),
+            })
+
+    if report["missing_from_table"] or report["stale_in_table"]:
+        report["status"] = "drift"
+    return report
+
+
+def _local_drift_cli(argv):
+    as_json = False
+    catalog_path = None
+    host = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--json":
+            as_json = True
+        elif a == "--catalog":
+            i += 1
+            catalog_path = argv[i] if i < len(argv) else None
+        elif a == "--host":
+            i += 1
+            host = argv[i] if i < len(argv) else None
+        i += 1
+    report = local_drift(catalog_path=catalog_path, host=host)
+    if as_json:
+        sys.stdout.write(json.dumps(report) + "\n")
+    elif report["status"] == "ok":
+        sys.stdout.write(
+            "Installed models and LOCAL_MODELS.md inventory agree; no drift.\n")
+    elif report["status"] == "parse_error":
+        sys.stdout.write("local-drift: %s\n" % "; ".join(report["errors"]))
+    else:
+        sys.stdout.write("Local model drift detected (offer — nothing written):\n")
+        for m in report["missing_from_table"]:
+            sys.stdout.write("  - installed but not in table: %s "
+                             "(add a row, bump last_reconciled)\n" % m)
+        for m in report["stale_in_table"]:
+            sys.stdout.write("  - in table but not installed: %s "
+                             "(verify removed; drop row or re-pull)\n" % m)
+    return 0
+
+
 def main(argv=None):
     """Run the model catalog staleness command-line interface."""
     argv = argv if argv is not None else sys.argv[1:]
     if argv and argv[0] == "codex-drift":
         return _codex_drift_cli(argv[1:])
+    if argv and argv[0] == "local-drift":
+        return _local_drift_cli(argv[1:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--dir", dest="base_dir")
