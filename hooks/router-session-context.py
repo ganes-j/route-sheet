@@ -56,6 +56,20 @@ else:
                 "\n\nMODEL CATALOGS (passive status — a refresh is offered at /ce-plan, not here): "
                 + " · ".join(lines)
             )
+        # Passive installed-vs-listed drift for LOCAL_MODELS.md: warn when a model
+        # is pulled but undocumented (or documented but gone). Short timeout so a
+        # down Ollama never delays session start; the reconcile is offered at
+        # /ce-plan, not here.
+        drift = model_staleness.local_drift(timeout=1.5)
+        drift_bits = ["%s installed but not in table" % m
+                      for m in drift.get("missing_from_table", [])]
+        drift_bits += ["%s in table but not installed" % m
+                       for m in drift.get("stale_in_table", [])]
+        if drift_bits:
+            ctx = ctx + (
+                "\n\nLOCAL MODEL DRIFT (offer — reconcile the LOCAL_MODELS.md inventory "
+                "at /ce-plan, not here): " + " · ".join(drift_bits)
+            )
     except Exception:
         pass
 
