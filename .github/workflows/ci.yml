@@ -38,3 +38,9 @@ jobs:
         run: python3 -m unittest tests.test_openrouter_discovery
       - name: OpenRouter discovery helper smoke test
         run: printf '' | python3 bin/openrouter_discovery.py --json
+      - name: route_pick helper syntax check
+        run: python3 -m py_compile bin/route_pick.py
+      - name: route_pick helper unit tests
+        run: python3 -m unittest tests.test_route_pick
+      - name: route_pick helper smoke test
+        run: python3 bin/route_pick.py "batch-extraction" --policy templates/ROUTING_POLICY.md --verifiable --low-stakes --constraint-clean
