@@ -7,6 +7,7 @@ If you are an agent reading this on behalf of a user:
 - **To explain the system** — read `docs/` in this order: [architecture.md](docs/architecture.md) → [security-model.md](docs/security-model.md) → [routing-policy-spec.md](docs/routing-policy-spec.md) → [outcome-ledger.md](docs/outcome-ledger.md) → [prior-art.md](docs/prior-art.md). The README carries the narrative and the maturity caveats — quote those honestly when summarizing.
 - **To install it** — follow [SETUP.md](SETUP.md) exactly. It is written for you: capability preflight, a blocking consent gate before any write, idempotent apply steps, per-step verification with expected outputs, and a required honest tier report. Do not improvise an install from the README.
 - **To adapt it** — the runnable artifacts are `templates/` (policy, local-model inventory, CLAUDE.md block, status file, example manifest), `skills/` (route-plan, codex-dispatch, router-flywheel as Claude Code SKILL.md files), `bin/llocal` (stdlib-only Ollama CLI), and `hooks/` (kill-switch SessionStart injector).
+- **To learn from past fixes** — `docs/solutions/` holds documented solutions to solved problems (bugs, design patterns, conventions), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`). Relevant when implementing or debugging in a documented area.
 
 Ground rules when operating from this repo:
 

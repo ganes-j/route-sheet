@@ -76,6 +76,18 @@ The accumulation of real dispatched outcomes per cell that a `❓` needs before 
 ### Bake-off window
 The exploration budget for a `❓` cell: route a verifiable, constraint-clean, cleanly-shape-matched unit *out* as a tagged trial (not to the coordinator), 2–3 trials, early-stop — two wins flip it toward `✅`. `❓` means run the bake-off, not play it safe.
 
+### Candidate-set matrix
+The `ROUTING_POLICY.md` §2 table where each task-shape row lists one or more **candidate executors**, each with its own `✅`/`❌`/`❓` state and exactly one `★`. Sparse — only migrated incumbents and deliberately-seeded challengers appear. Replaces the old one-model-per-shape table so one local model can be pitted against another (a model-vs-model bake-off).
+
+### ★ preferred / incumbent-by-lean
+The `★` on a candidate row is *computed*, not hand-set: the highest verified (`✅`) candidate if any exists, else the **incumbent-by-lean** — the model that held the row before challengers were seeded. Ties among `✅`s break on cost/size (local + factual data only, never a benchmark/community signal).
+
+### Challenger
+A non-preferred `❓` candidate on a row. It is eligible to compete even against a `★✅` incumbent (challenger-competes), but is only routed a real unit when that unit is **low-stakes** (challenger-scheduling), so important work never rides an unproven model.
+
+### route_pick.py
+The stdlib helper that makes §2 selection deterministic: `pick(shape, verifiable, low_stakes, constraint_clean, matrix_text)` → `(executor, is_bake_off_trial)`. It parses the matrix and enforces the candidate-selection rules (auto-pick `★`, verify-gate, challenger-competes, low-stakes scheduling), so `route-plan` and ad-hoc dispatch pick the same executor every time.
+
 ### R0 gate
 The gate on the flywheel's *automated* proposals: it stays dry-run until routing has fired unprompted on 3 consecutive real plans — "don't auto-learn until it is proven used." Status tracked in [templates/ROUTER_STATUS.md](templates/ROUTER_STATUS.md).
 
