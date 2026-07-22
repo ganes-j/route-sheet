@@ -142,6 +142,34 @@ class LocalDriftTests(unittest.TestCase):
         for junk in ("--num-predict", "/api/chat", "--workers", "--workers 1"):
             self.assertNotIn(junk, r["listed"])
 
+    def test_namespaced_and_uppercase_ids_are_listed(self):
+        # dual-review #1/#4: Ollama IDs can be namespaced (host/user/model) and
+        # carry uppercase (GGUF, Qwen). These must parse as listed, not be dropped
+        # by an over-strict tag regex (which would report false drift).
+        inv = ["hf.co/unsloth/gpt-oss-120b-GGUF:Q4_K_XL", "library/llama3:latest"]
+        self._write(local_catalog(inventory=inv))
+        installed = ["hf.co/unsloth/gpt-oss-120b-GGUF:Q4_K_XL", "library/llama3:latest"]
+        r = ms.local_drift(catalog_path=self.cat, installed=installed)
+        self.assertIn("hf.co/unsloth/gpt-oss-120b-GGUF:Q4_K_XL", r["listed"])
+        self.assertIn("library/llama3:latest", r["listed"])
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["missing_from_table"], [])
+
+    def test_missing_inventory_heading_is_parse_error_not_drift(self):
+        # dual-review #2: a catalog with no 'Local Model Inventory' heading must
+        # NOT report every installed model as drift — that's a parse failure, not
+        # documentation drift.
+        text = (
+            "---\nlast_reconciled: 2026-07-22\nstaleness_days: 30\n---\n\n"
+            "# Local Models\n\n## Some Other Heading\n\n"
+            "| Model | Type |\n|---|---|\n| `qwen3.5:35b-a3b-coding-nvfp4` | LLM |\n"
+        )
+        self._write(text)
+        r = ms.local_drift(catalog_path=self.cat, installed=list(INSTALLED))
+        self.assertEqual(r["status"], "parse_error")
+        self.assertEqual(r["missing_from_table"], [])
+        self.assertEqual(r["proposed_edits"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

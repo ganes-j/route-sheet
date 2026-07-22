@@ -359,7 +359,9 @@ def _codex_drift_cli(argv):
     return 0
 
 
-_OLLAMA_TAG_RE = re.compile(r"[a-z0-9][a-z0-9._-]*(?::[a-z0-9._-]+)?\Z")
+# Ollama IDs may be namespaced (`host/user/model`) and carry uppercase
+# (`...GGUF`, `Qwen/...`); allow `/` and mixed case so valid tags aren't dropped.
+_OLLAMA_TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?\Z")
 
 
 def _default_local_catalog():
@@ -455,6 +457,16 @@ def local_drift(catalog_path=None, installed=None, host=None, timeout=5):
         report["status"] = "parse_error"
         report["errors"].append(
             "LOCAL_MODELS.md: could not read %s" % catalog_path)
+        return report
+
+    # A missing inventory heading is a parse failure, not drift — otherwise a
+    # renamed/malformed catalog reports every installed model as undocumented.
+    if not any(ln.startswith("## ") and "local model inventory" in ln.lower()
+               for ln in text.splitlines()):
+        report["status"] = "parse_error"
+        report["errors"].append(
+            "LOCAL_MODELS.md: 'Local Model Inventory' section not found "
+            "— catalog malformed?")
         return report
 
     listed = _parse_listed_local_models(text)
