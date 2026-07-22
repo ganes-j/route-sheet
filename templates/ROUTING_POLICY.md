@@ -33,20 +33,20 @@ These are hard gates checked BEFORE the task-shape table. A task that matches a 
 
 ## 2. Task-shape → executor table
 
-Match a unit's shape to a row; apply the constraint layer first. Cell = confidence that the executor handles that shape well, from real router outcomes.
+Match a unit's shape to a row; apply the constraint layer first. Each row lists one or more **candidate executors**; each candidate carries a state glyph (`✅`/`❌`/`❓`) = confidence it handles that shape well, from real router outcomes, and **exactly one `★`** marks the *preferred* candidate — what `route-plan` dispatches for a real (non-trial) assignment. Cell grammar, the `★` rule, and how a `❓` challenger earns a trial against a `★` incumbent are in §3.
 
-| Task shape | Preferred executor | Cell | Notes |
-|---|---|---|---|
-| impl-from-frozen-spec | codex-implementer | ❓ | Highest baseline demand. Needs frozen approach + per-unit tests. Credential-clean or dev-grade `.env` only. |
-| bugfix-with-known-repro | codex-implementer | ❓ | Repro + expected behavior in the unit. |
-| mechanical-refactor | codex-implementer | ❓ | Extract/rewire with tests; no design latitude. |
-| CI/dep/test-bulk | codex-implementer | ❓ | Test authoring / dep bumps / tooling scripts from clear spec. |
-| batch-extraction (text/JSON) | llocal (coding model) | ❓ | Bulk structured extraction. Verify every item (llocal drops on timeout). |
-| PII-batch classification | llocal (coding model) | ❓ | Constraint layer forces local. Keep a deterministic ground-truth path. |
-| vision / OCR batch | llocal (vision model) | ❓ | Image → text. |
-| huge-context sweep | codex-scout OR haiku-scout | ❓ | Read-only. haiku for cheap/fast; codex-scout when one big working context or an independent model helps. **Zero demand on execution plans** (baseline) — value is in research/planning, ad-hoc. |
-| adversarial / second-opinion review | codex-scout | ❓ | Read-only, independent model. Note: reviewing Codex-*written* output is a never-delegate gate. |
-| large-context code read / "where is X" | haiku-scout | ❓ | Cheapest read tier. |
+| Task shape | Candidate executors (`★` = preferred) | Notes |
+|---|---|---|
+| impl-from-frozen-spec | codex-implementer ★❓ | Highest baseline demand. Needs frozen approach + per-unit tests. Credential-clean or dev-grade `.env` only. |
+| bugfix-with-known-repro | codex-implementer ★❓ | Repro + expected behavior in the unit. |
+| mechanical-refactor | codex-implementer ★❓ | Extract/rewire with tests; no design latitude. |
+| CI/dep/test-bulk | codex-implementer ★❓ | Test authoring / dep bumps / tooling scripts from clear spec. |
+| batch-extraction (text/JSON) | qwen3.5 ★❓ · gpt-oss:20b ❓ · gpt-oss:120b ❓hq | Candidates are llocal models (pick the concrete tag per `LOCAL_MODELS.md`). Bulk structured extraction. Verify every item (llocal drops on timeout). `hq` = the higher-quality lane. |
+| PII-batch classification | qwen3.5 ★❓ · gpt-oss:20b ❓ | llocal models. Constraint layer forces local. Keep a deterministic ground-truth path. |
+| vision / OCR batch | llava ★❓ | llocal vision model. Image → text. |
+| huge-context sweep | codex-scout OR haiku-scout ★❓ | Read-only. haiku for cheap/fast; codex-scout when one big working context or an independent model helps. **Zero demand on execution plans** (baseline) — value is in research/planning, ad-hoc. |
+| adversarial / second-opinion review | codex-scout ★❓ | Read-only, independent model. Note: reviewing Codex-*written* output is a never-delegate gate. |
+| large-context code read / "where is X" | haiku-scout ★❓ | Cheapest read tier. |
 
 **Coordinator-relative rate gap.** Offload pays more the wider the coordinator↔worker cost gap. Read the active session model at plan time: a frontier-tier session model → gap to Haiku is ~10x, offload is cheap; a mid-tier session model → gap ~5x. Codex under a ChatGPT plan is flat-rate (near-zero marginal until the usage window) but carries a minutes-scale latency tax — worth it for work that takes minutes anyway, a loss for small synchronous edits.
 
@@ -55,6 +55,13 @@ Match a unit's shape to a row; apply the constraint layer first. Cell = confiden
 ## 3. Cell format & flip thresholds
 
 Each cell: `state (n=X: breakdown, last YYYY-MM-DD)` — e.g. `✅ (n=4: 3 clean, 1 fallback, last 2026-07-20)`.
+
+**Multi-candidate cell grammar (§2 candidate lists).** A row's executor column lists candidates separated by ` · `. Each candidate is `<executor> [★]<state>[hq] [(n=X: breakdown, last YYYY-MM-DD)]`:
+- `<executor>` — a policy executor name or a concrete llocal model tag (`qwen3.5`, `gpt-oss:20b`, `llava`), matching `LOCAL_MODELS.md`.
+- `★` — attaches to the state of **exactly one** candidate per row = the **preferred** executor `route-plan` dispatches for a real (non-trial) assignment. Chosen by the auto-pick rule (R3) below, not hand-picked.
+- `<state>` — `✅`/`❌`/`❓` as above, per candidate (each candidate earns its own state independently).
+- `hq` — optional qualifier: this candidate is a *higher-quality* lane (seeded for quality over speed). Advisory only — it does **not** change selection logic; it records why the candidate was seeded.
+- Sparse by construction: only migrated incumbents + deliberately-seeded challengers appear. No blanket shape×model backfill.
 
 - **States:** `✅` verified-good · `❌` ruled-out · `❓` unknown (benchmark once, then record — never re-derive).
 - **`❓ → ✅`** requires **2+ clean outcomes** (routed, survived the coordinator re-check, ≤1 fix round).
@@ -71,6 +78,16 @@ A `❓` is **not** a reason to fall back to the coordinator — it's a standing 
 - **Cost-aware — 2–3 is a ceiling, not a quota.** Cheap shapes (bulk extraction, small frozen-spec, where-is-X reads) spend the full window on real matching units freely. Expensive shapes (huge-context sweeps, large impls, latency-heavy Codex on a critical path) use the **smallest genuine representative unit**, or **one A/B**, or **defer** the bake-off to the next low-stakes matching unit — never force an expensive trial onto a critical path.
 - **Tag it.** A bake-off dispatch is logged as an **exploration** trial (manifest / ad-hoc outcome ledger), so a loss reads as *data*, not a failure to explain away.
 - **The window never opens for** (constraint layer + discipline floor still win): never-delegate shapes, PII / prod-credential-blocked units, and **bare units with no verify command** — no re-check = no taster = no safe bake-off. Route-out-at-`❓` applies only to verifiable, constraint-clean, shape-matched units.
+
+### Candidate selection & bake-off scheduling (multi-candidate rows)
+
+These four rules make selection on a candidate-list row **deterministic** — they are the spec that `bin/route_pick.py` enforces (given `shape`, `verifiable`, `low_stakes`, `constraint_clean`, it returns `(executor, is_bake_off_trial)`), so route-plan and ad-hoc dispatch pick the same executor every time. The constraint layer (§1) runs upstream and is passed in as `constraint_clean` — it is **not** re-derived here.
+
+- **R3 — auto-pick `★` (which candidate is preferred).** The `★` is computed, not hand-set: it is the **highest verified cell** on the row (a `✅` candidate) if any `✅` exists; **else the incumbent-by-lean** — the currently-named/migrated model that held the row before challengers were seeded. **Tiebreak among multiple `✅`s = cost/size** — the cheaper / smaller candidate wins, using **local + factual data only** (model size from `LOCAL_MODELS.md`, local cost facts). Never consult an OpenRouter ranking, a benchmark score, or any community-signal / freshness-research field to break the tie — those are discovery inputs (§4), never selection inputs.
+- **R4 — verify-gate.** A unit with **no load-bearing verify command** (`verifiable=False`) is **never** routed to a write-worker or a bake-off trial — no re-check = no taster = no safe outsource (extends the §3 bake-off-window "bare unit" floor). It goes to the coordinator, or to a read-only executor when the shape is read-only. `is_bake_off_trial` is always `False` in this case.
+- **R5 — challenger-competes.** A `❓` challenger on a row is **eligible for a trial even when the row already has a `★✅` incumbent**. A proven incumbent does **not** freeze out challengers — a better/cheaper model can still earn its own cell. (Selection between them is R6.)
+- **R6 — challenger-scheduling (low-stakes only).** On a shape-matched, `verifiable`, `constraint_clean` unit where a `❓` challenger exists: **if the unit is low-stakes** (small, cheap re-check, not on the critical path) → route it to the challenger; **otherwise** (high-stakes) → route to the `★` preferred and let the challenger wait for the next low-stakes unit. Bounded downside: the coordinator re-check still catches any challenger error, and important work never rides an unproven model. Accepted cost: a shape with few low-stakes units gathers challenger trials slowly (see Risks).
+- **The trial tag (`is_bake_off_trial`).** Set whenever the chosen candidate's cell is still `❓` — routing to an unproven cell is itself an exploration whose outcome resolves it (per the bake-off window: `❓` means *run the bake-off*). So a `❓` challenger (low-stakes path) **and** a `❓ ★` incumbent (when it's still unproven) are both trials; a `✅ ★` is not, and the coordinator (verify-gate / constraint-blocked / no-match fallback) never is.
 
 **Shipping router changes (fast-track).** Policy edits, catalog mirrors, proving-outcome logs, and cell flips ship as PRs to the ruleset-protected `main` (audit trail) on a **fast track — no required review, no wait for a separate merge request**: the coordinator opens the PR and self-merges (squash) immediately. The `main` ruleset enforces the flow (require-PR + no force-push/deletion) without gating on review or thread-resolution; advisory bot review may comment but never blocks. The one carve-out: a **cell state-change** (`❓→✅` / `✅→❌`) still gets the maintainer's §3 decision sign-off — surfaced for a yes — after which its flip PR fast-tracks like the rest.
 
