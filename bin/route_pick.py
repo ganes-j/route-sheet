@@ -80,7 +80,11 @@ def _find_row(text, shape):
         first = cells[0]
         if first.lower() in ("task shape", "") or set(first) <= set("-: "):
             continue  # header / separator row
-        if first == want or first.startswith(want):
+        # Exact, or a prefix that ends at a word boundary — so 'batch-extraction'
+        # matches 'batch-extraction (text/JSON)' but 'batch' / 'impl' do not
+        # silently match a longer shape.
+        if first == want or (first.startswith(want)
+                             and first[len(want):len(want) + 1] in (" ", "(")):
             return cells[1]
     return None
 

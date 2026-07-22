@@ -141,6 +141,23 @@ class RoutePickTests(unittest.TestCase):
         self.assertEqual(ex, "coordinator")
         self.assertFalse(trial)
 
+    # Word-boundary shape match — a truncated shape must NOT silently select a
+    # longer row; only exact or boundary-delimited prefixes match.
+    def test_shape_match_requires_word_boundary(self):
+        # exact and boundary-prefix both resolve to the row
+        for shape in ("batch-extraction (text/JSON)", "batch-extraction"):
+            ex, _ = route_pick.pick(
+                shape, verifiable=True, low_stakes=False,
+                constraint_clean=True, matrix_text=ALL_UNKNOWN)
+            self.assertEqual(ex, "qwen3.5", "shape %r should match" % shape)
+        # truncated / abbreviated shapes must NOT match → safe coordinator
+        for shape in ("batch", "batch-ext", "b"):
+            ex, trial = route_pick.pick(
+                shape, verifiable=True, low_stakes=False,
+                constraint_clean=True, matrix_text=ALL_UNKNOWN)
+            self.assertEqual((ex, trial), ("coordinator", False),
+                             "truncated shape %r must not match" % shape)
+
     def test_parse_safety_garbage_text_no_exception(self):
         for junk in ("", "not a table at all", "## 2.\n| broken |\n", "|||"):
             try:
