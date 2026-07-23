@@ -170,7 +170,440 @@ class SweepFilterTests(unittest.TestCase):
         )
 
 
+class CaptureCommandTests(unittest.TestCase):
+    def test_capture_writes_namespaced_bundle_with_meta_spec_and_first_shot(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            spec_file = root / "spec.md"
+            first_shot_file = root / "first-shot.patch"
+            spec_file.write_text("classify these rows", encoding="utf-8")
+            first_shot_file.write_text("incumbent output", encoding="utf-8")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = bakeoff.main(
+                    [
+                        "capture",
+                        "--unit-ref", "U6",
+                        "--base-commit", "abc123",
+                        "--spec-file", str(spec_file),
+                        "--verify-cmd", "python3 check.py",
+                        "--verify-cmd", "python3 lint.py",
+                        "--first-shot-file", str(first_shot_file),
+                        "--namespace", "sample-plan",
+                        "--root", str(root / "bundles"),
+                    ]
+                )
+
+            bundle_dir = root / "bundles" / "sample-plan" / "U6"
+            meta = json.loads(
+                (bundle_dir / "meta.json").read_text(encoding="utf-8")
+            )
+            spec = (bundle_dir / "spec.md").read_text(encoding="utf-8")
+            first_shot = (bundle_dir / "first_shot.patch").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue().strip(), str(bundle_dir))
+        self.assertEqual(meta["unit_ref"], "U6")
+        self.assertEqual(meta["namespace"], "sample-plan")
+        self.assertEqual(meta["base_commit"], "abc123")
+        self.assertEqual(
+            meta["verify_commands"],
+            ["python3 check.py", "python3 lint.py"],
+        )
+        self.assertFalse(meta["margin_limited"])
+        self.assertEqual(spec, "classify these rows")
+        self.assertEqual(first_shot, "incumbent output")
+
+    def test_capture_refusal_prints_reason_and_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            spec_file = root / "spec.md"
+            spec_file.write_text("safe spec", encoding="utf-8")
+
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                result = bakeoff.main(
+                    [
+                        "capture",
+                        "--unit-ref", "U6",
+                        "--base-commit", "abc123",
+                        "--spec-file", str(spec_file),
+                        "--verify-cmd", "python3 check.py",
+                        "--namespace", "../unsafe",
+                        "--root", str(root / "bundles"),
+                    ]
+                )
+
+        self.assertNotEqual(result, 0)
+        self.assertIn("unsafe bundle path component", errors.getvalue())
+
+    def test_capture_missing_spec_prints_failure_and_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                result = bakeoff.main(
+                    [
+                        "capture",
+                        "--unit-ref", "U6",
+                        "--base-commit", "abc123",
+                        "--spec-file", str(root / "missing-spec.md"),
+                        "--verify-cmd", "python3 check.py",
+                        "--namespace", "sample-plan",
+                        "--root", str(root / "bundles"),
+                    ]
+                )
+
+        self.assertEqual(result, 2)
+        self.assertIn("capture failed:", errors.getvalue())
+
+
 class SweepDriverTests(unittest.TestCase):
+    def _write_manifest(self, root, name="sample-routing.md"):
+        manifest = root / name
+        manifest.write_text(
+            "## Assignments\n"
+            "- U6 → llocal:qwen3.5 — batch-extraction: rows "
+            "— load-bearing check: `python3 check.py`\n"
+            "\n## Execution log\n"
+            "U6 · llocal:qwen3.5 · PASS · re-check green "
+            "· 0 fix rounds · session · 2026-07-23 · base:abc123\n",
+            encoding="utf-8",
+        )
+        return manifest
+
+    def _sweep_args(self, root, manifest):
+        return SimpleNamespace(
+            sweep=str(manifest),
+            ledger=str(root / "ledger.jsonl"),
+            challengers="gpt-oss:20b",
+            judge_model="qwen2.5:7b",
+            runner_log=None,
+        )
+
+    def _capture_bundle(self, root, namespace, first_shot=None):
+        spec_file = root / "spec.md"
+        spec_file.write_text("classify these rows", encoding="utf-8")
+        bundle_root = root / "bundles"
+        argv = [
+            "capture",
+            "--unit-ref", "U6",
+            "--base-commit", "abc123",
+            "--spec-file", str(spec_file),
+            "--verify-cmd", "python3 check.py",
+            "--namespace", namespace,
+            "--root", str(bundle_root),
+        ]
+        if first_shot is not None:
+            first_shot_file = root / "first-shot.patch"
+            first_shot_file.write_text(first_shot, encoding="utf-8")
+            argv.extend(["--first-shot-file", str(first_shot_file)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(bakeoff.main(argv), 0)
+        return bundle_root
+
+    def test_capture_then_sweep_replays_bundle_from_manifest_namespace(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest = self._write_manifest(
+                root,
+                "2026-07-23-002-feat-bakeoff-plan-routing.md",
+            )
+            namespace = "2026-07-23-002-feat-bakeoff-plan"
+            bundle_root = self._capture_bundle(
+                root,
+                namespace,
+                first_shot="incumbent output",
+            )
+
+            calls = []
+            real_root = bakeoff.DEFAULT_BUNDLE_ROOT
+            real_grade = bakeoff.grading.grade_replay
+            bakeoff.DEFAULT_BUNDLE_ROOT = bundle_root
+
+            def fake_grade(unit, meta, challengers, **kwargs):
+                calls.append((unit, meta, challengers, kwargs))
+                return bakeoff.grading.ReplayOutcome(
+                    [{"unit_ref": unit["unit_ref"]}],
+                    None,
+                )
+
+            bakeoff.grading.grade_replay = fake_grade
+            try:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = bakeoff.cmd_sweep(
+                        self._sweep_args(root, manifest)
+                    )
+            finally:
+                bakeoff.DEFAULT_BUNDLE_ROOT = real_root
+                bakeoff.grading.grade_replay = real_grade
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 1)
+        unit, meta, challengers, kwargs = calls[0]
+        self.assertEqual(unit["unit_ref"], "U6")
+        self.assertEqual(meta["namespace"], namespace)
+        self.assertEqual(kwargs["incumbent_first_shot"], "incumbent output")
+        self.assertIn("wrote 1 field record(s)", output.getvalue())
+
+    def test_capture_without_first_shot_sweeps_verify_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest = self._write_manifest(root)
+            bundle_root = self._capture_bundle(root, "sample")
+
+            calls = []
+            real_root = bakeoff.DEFAULT_BUNDLE_ROOT
+            real_grade = bakeoff.grading.grade_replay
+            bakeoff.DEFAULT_BUNDLE_ROOT = bundle_root
+
+            def fake_grade(unit, meta, challengers, **kwargs):
+                calls.append((meta, kwargs))
+                return bakeoff.grading.ReplayOutcome(
+                    [{"unit_ref": unit["unit_ref"]}],
+                    None,
+                )
+
+            bakeoff.grading.grade_replay = fake_grade
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    result = bakeoff.cmd_sweep(
+                        self._sweep_args(root, manifest)
+                    )
+            finally:
+                bakeoff.DEFAULT_BUNDLE_ROOT = real_root
+                bakeoff.grading.grade_replay = real_grade
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 1)
+        meta, kwargs = calls[0]
+        self.assertTrue(meta["margin_limited"])
+        self.assertIsNone(kwargs["incumbent_first_shot"])
+
+    def test_successful_sweep_marks_bundle_and_second_sweep_skips_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest = self._write_manifest(root)
+            bundle_root = self._capture_bundle(root, "sample")
+            bundle_dir = bundle_root / "sample" / "U6"
+
+            calls = []
+            real_root = bakeoff.DEFAULT_BUNDLE_ROOT
+            real_grade = bakeoff.grading.grade_replay
+            bakeoff.DEFAULT_BUNDLE_ROOT = bundle_root
+
+            def fake_grade(unit, meta, challengers, **kwargs):
+                calls.append(unit["unit_ref"])
+                return bakeoff.grading.ReplayOutcome(
+                    [{"unit_ref": unit["unit_ref"]}],
+                    None,
+                )
+
+            bakeoff.grading.grade_replay = fake_grade
+            try:
+                first_output = io.StringIO()
+                with contextlib.redirect_stdout(first_output):
+                    first_result = bakeoff.cmd_sweep(
+                        self._sweep_args(root, manifest)
+                    )
+                second_output = io.StringIO()
+                with contextlib.redirect_stdout(second_output):
+                    second_result = bakeoff.cmd_sweep(
+                        self._sweep_args(root, manifest)
+                    )
+                replayed = (bundle_dir / ".replayed").exists()
+            finally:
+                bakeoff.DEFAULT_BUNDLE_ROOT = real_root
+                bakeoff.grading.grade_replay = real_grade
+
+        self.assertEqual(first_result, 0)
+        self.assertEqual(second_result, 0)
+        self.assertEqual(calls, ["U6"])
+        self.assertTrue(replayed)
+        self.assertIn("wrote 1 field record(s)", first_output.getvalue())
+        self.assertIn(
+            "SKIP U6: already replayed",
+            second_output.getvalue(),
+        )
+        self.assertIn("wrote 0 field record(s)", second_output.getvalue())
+
+    def test_infrastructure_failure_is_not_marked_and_retries_next_sweep(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest = self._write_manifest(root)
+            bundle_root = self._capture_bundle(root, "sample")
+            bundle_dir = bundle_root / "sample" / "U6"
+
+            calls = []
+            real_root = bakeoff.DEFAULT_BUNDLE_ROOT
+            real_grade = bakeoff.grading.grade_replay
+            bakeoff.DEFAULT_BUNDLE_ROOT = bundle_root
+
+            def fake_grade(unit, meta, challengers, **kwargs):
+                calls.append(unit["unit_ref"])
+                return bakeoff.grading.ReplayOutcome(
+                    [],
+                    "challenger infrastructure failure",
+                )
+
+            bakeoff.grading.grade_replay = fake_grade
+            try:
+                for _ in range(2):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        result = bakeoff.cmd_sweep(
+                            self._sweep_args(root, manifest)
+                        )
+                replayed = (bundle_dir / ".replayed").exists()
+            finally:
+                bakeoff.DEFAULT_BUNDLE_ROOT = real_root
+                bakeoff.grading.grade_replay = real_grade
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["U6", "U6"])
+        self.assertFalse(replayed)
+
+    def test_sentinel_write_failure_is_visible_and_returns_nonzero(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest = self._write_manifest(root)
+            bundle_root = self._capture_bundle(root, "sample")
+            bundle_dir = bundle_root / "sample" / "U6"
+
+            real_root = bakeoff.DEFAULT_BUNDLE_ROOT
+            real_grade = bakeoff.grading.grade_replay
+            real_touch = Path.touch
+            bakeoff.DEFAULT_BUNDLE_ROOT = bundle_root
+            bakeoff.grading.grade_replay = lambda unit, *_args, **_kwargs: (
+                bakeoff.grading.ReplayOutcome(
+                    [{"unit_ref": unit["unit_ref"]}],
+                    None,
+                )
+            )
+
+            def failing_touch(path, *args, **kwargs):
+                if path.name == ".replayed":
+                    raise OSError("read-only bundle")
+                return real_touch(path, *args, **kwargs)
+
+            Path.touch = failing_touch
+            try:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = bakeoff.cmd_sweep(
+                        self._sweep_args(root, manifest)
+                    )
+                replayed = (bundle_dir / ".replayed").exists()
+            finally:
+                Path.touch = real_touch
+                bakeoff.DEFAULT_BUNDLE_ROOT = real_root
+                bakeoff.grading.grade_replay = real_grade
+
+        self.assertEqual(result, 2)
+        self.assertFalse(replayed)
+        self.assertIn(
+            "SKIP U6: could not claim replay marker: read-only bundle",
+            output.getvalue(),
+        )
+        # Claim fails BEFORE replay, so NO record is written — this is the fix:
+        # a marker failure can no longer leave a recorded bundle that re-runs
+        # and duplicates on the next sweep.
+        self.assertIn("wrote 0 field record(s)", output.getvalue())
+
+    def test_sweep_with_pending_and_replayed_bundles_runs_only_pending(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest = root / "sample-routing.md"
+            manifest.write_text(
+                "## Assignments\n"
+                "- U6 → llocal:qwen3.5 — batch-extraction: rows "
+                "— load-bearing check: `python3 check.py`\n"
+                "- U7 → llocal:qwen3.5 — batch-extraction: rows "
+                "— load-bearing check: `python3 check.py`\n"
+                "\n## Execution log\n"
+                "U6 · llocal:qwen3.5 · PASS · re-check green "
+                "· 0 fix rounds · session · 2026-07-23 · base:abc123\n"
+                "U7 · llocal:qwen3.5 · PASS · re-check green "
+                "· 0 fix rounds · session · 2026-07-23 · base:def456\n",
+                encoding="utf-8",
+            )
+            bundle_root = self._capture_bundle(root, "sample")
+            replayed_dir = bundle_root / "sample" / "U6"
+            (replayed_dir / ".replayed").touch()
+            pending_dir = bundle_root / "sample" / "U7"
+            pending_dir.mkdir()
+            (pending_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "unit_ref": "U7",
+                        "base_commit": "def456",
+                        "verify_commands": ["python3 check.py"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (pending_dir / "spec.md").write_text(
+                "classify these rows",
+                encoding="utf-8",
+            )
+
+            calls = []
+            real_root = bakeoff.DEFAULT_BUNDLE_ROOT
+            real_grade = bakeoff.grading.grade_replay
+            bakeoff.DEFAULT_BUNDLE_ROOT = bundle_root
+
+            def fake_grade(unit, meta, challengers, **kwargs):
+                calls.append(unit["unit_ref"])
+                return bakeoff.grading.ReplayOutcome(
+                    [{"unit_ref": unit["unit_ref"]}],
+                    None,
+                )
+
+            bakeoff.grading.grade_replay = fake_grade
+            try:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = bakeoff.cmd_sweep(
+                        self._sweep_args(root, manifest)
+                    )
+                pending_replayed = (pending_dir / ".replayed").exists()
+            finally:
+                bakeoff.DEFAULT_BUNDLE_ROOT = real_root
+                bakeoff.grading.grade_replay = real_grade
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, ["U7"])
+        self.assertTrue(pending_replayed)
+        self.assertIn("SKIP U6: already replayed", output.getvalue())
+        self.assertIn("wrote 1 field record(s)", output.getvalue())
+
+    def test_sweep_wrong_namespace_skips_missing_bundle_without_crashing(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest = self._write_manifest(root)
+            bundle_root = self._capture_bundle(root, "different-plan")
+
+            real_root = bakeoff.DEFAULT_BUNDLE_ROOT
+            bakeoff.DEFAULT_BUNDLE_ROOT = bundle_root
+            try:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = bakeoff.cmd_sweep(
+                        self._sweep_args(root, manifest)
+                    )
+            finally:
+                bakeoff.DEFAULT_BUNDLE_ROOT = real_root
+
+        self.assertEqual(result, 0)
+        self.assertIn(
+            "SKIP U6: unreplayable: replay bundle not found",
+            output.getvalue(),
+        )
+        self.assertIn("wrote 0 field record(s)", output.getvalue())
+
     def test_sweep_joins_manifest_and_replays_bundle_with_frozen_spec(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -197,7 +630,7 @@ class SweepDriverTests(unittest.TestCase):
                 "· 0 fix rounds · session · 2026-07-23 · base:missing1\n",
                 encoding="utf-8",
             )
-            failed_bundle_dir = root / "bundles" / "U6"
+            failed_bundle_dir = root / "bundles" / "sample" / "U6"
             failed_bundle_dir.mkdir(parents=True)
             (failed_bundle_dir / "meta.json").write_text(
                 json.dumps(
@@ -213,7 +646,7 @@ class SweepDriverTests(unittest.TestCase):
                 "first replay fails",
                 encoding="utf-8",
             )
-            bundle_dir = root / "bundles" / "U7"
+            bundle_dir = root / "bundles" / "sample" / "U7"
             bundle_dir.mkdir(parents=True)
             (bundle_dir / "meta.json").write_text(
                 json.dumps(

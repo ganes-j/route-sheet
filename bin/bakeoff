@@ -9,6 +9,8 @@ local judge model for the pairwise margin.
 
   bakeoff run BUNDLE_DIR [--ledger PATH] [--challengers m1,m2]
        [--judge-model MODEL] [--detach]
+  bakeoff capture --unit-ref R --base-commit SHA --spec-file PATH
+       --verify-cmd C --namespace NS [--first-shot-file PATH] [--root DIR]
   bakeoff --sweep MANIFEST_GLOB [...]
 
 The runner is single-shot only (batch-extraction / vision-OCR — shapes llocal
@@ -304,6 +306,39 @@ def _bundle_skip_reason(unit, meta):
     return None
 
 
+def _manifest_namespace(manifest_path):
+    return manifest_path.stem.removesuffix("-routing")
+
+
+def cmd_capture(args):
+    spec_path = Path(args.spec_file).expanduser()
+    try:
+        spec = spec_path.read_text(encoding="utf-8")
+        first_shot = None
+        if args.first_shot_file:
+            first_shot = Path(args.first_shot_file).expanduser().read_text(
+                encoding="utf-8"
+            )
+        result = field_records.write_bundle(
+            args.root,
+            args.unit_ref,
+            base_commit=args.base_commit,
+            spec=spec,
+            verify_commands=args.verify_cmd,
+            first_shot_patch=first_shot,
+            namespace=args.namespace,
+        )
+    except OSError as exc:
+        print(f"capture failed: {exc}", file=sys.stderr)
+        return 2
+
+    if not result.written:
+        print(f"capture refused: {result.refused_reason}", file=sys.stderr)
+        return 2
+    print(result.path)
+    return 0
+
+
 def cmd_sweep(args):
     pattern = str(Path(args.sweep).expanduser())
     manifests = [
@@ -318,6 +353,9 @@ def cmd_sweep(args):
     for manifest_path in manifests:
         try:
             manifest_units, manifest_skips = _parse_manifest(manifest_path)
+            namespace = _manifest_namespace(manifest_path)
+            for unit in manifest_units:
+                unit["bundle_namespace"] = namespace
             units.extend(manifest_units)
             parse_skips.extend(manifest_skips)
         except OSError as exc:
@@ -333,8 +371,17 @@ def cmd_sweep(args):
     log = _log(args.runner_log)
     candidates = None
     records_written = 0
+    replay_marker_failed = False
     for unit in replayable:
-        bundle_dir = DEFAULT_BUNDLE_ROOT / unit["unit_ref"]
+        bundle_dir = (
+            DEFAULT_BUNDLE_ROOT
+            / unit["bundle_namespace"]
+            / unit["unit_ref"]
+        )
+        replayed_path = bundle_dir / ".replayed"
+        if replayed_path.exists():
+            print(f"SKIP {unit['unit_ref']}: already replayed")
+            continue
         meta_path = bundle_dir / "meta.json"
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -367,6 +414,21 @@ def cmd_sweep(args):
         if candidates is None:
             candidates = _candidate_executors(args.challengers)
         challengers = grading.select_challengers(unit, candidates)
+        # Atomic claim BEFORE replaying: an O_EXCL create (touch exist_ok=False)
+        # stops a concurrent session-end sweep from replaying the same bundle
+        # (duplicate records), and marking before the ledger write means a later
+        # marker failure can't leave an already-recorded bundle unmarked. The
+        # claim is released below if the replay lands no record (infra failure /
+        # no eligible challenger), so those retry on the next sweep.
+        try:
+            replayed_path.touch(exist_ok=False)
+        except FileExistsError:
+            print(f"SKIP {unit['unit_ref']}: already claimed by a concurrent sweep")
+            continue
+        except OSError as exc:
+            replay_marker_failed = True
+            print(f"SKIP {unit['unit_ref']}: could not claim replay marker: {exc}")
+            continue
         try:
             outcome = grading.grade_replay(
                 unit, meta, challengers,
@@ -382,14 +444,20 @@ def cmd_sweep(args):
                 log_fn=log,
             )
         except OSError as exc:
+            replayed_path.unlink(missing_ok=True)  # release claim; replay didn't complete
             print(f"SKIP {unit['unit_ref']}: replay failed: {exc}")
             continue
-        records_written += len(outcome.records_written)
+        record_count = len(outcome.records_written)
+        records_written += record_count
+        if record_count == 0:
+            # Nothing recorded (infra failure / no eligible challengers) —
+            # release the claim so the next sweep retries this bundle.
+            replayed_path.unlink(missing_ok=True)
         if outcome.skipped_reason:
             print(f"SKIP {unit['unit_ref']}: {outcome.skipped_reason}")
 
     print(f"wrote {records_written} field record(s)")
-    return 0
+    return 2 if replay_marker_failed else 0
 
 
 def cmd_run(args):
@@ -474,13 +542,28 @@ def main(argv=None):
     pr.add_argument("--detach", action="store_true")
     pr.set_defaults(func=cmd_run)
 
+    pc = sub.add_parser("capture", help="capture one namespaced replay bundle")
+    pc.add_argument("--unit-ref", required=True)
+    pc.add_argument("--base-commit", required=True)
+    pc.add_argument("--spec-file", required=True)
+    pc.add_argument(
+        "--verify-cmd",
+        action="append",
+        required=True,
+        help="verification command (repeatable)",
+    )
+    pc.add_argument("--first-shot-file")
+    pc.add_argument("--namespace", required=True)
+    pc.add_argument("--root", default=str(DEFAULT_BUNDLE_ROOT))
+    pc.set_defaults(func=cmd_capture)
+
     args = ap.parse_args(argv)
     if args.sweep and hasattr(args, "func"):
-        ap.error("--sweep cannot be combined with run")
+        ap.error(f"--sweep cannot be combined with {args.cmd}")
     if args.sweep:
         return cmd_sweep(args)
     if not hasattr(args, "func"):
-        ap.error("one of --sweep or run is required")
+        ap.error("one of --sweep, run, or capture is required")
     return args.func(args)
 
 
