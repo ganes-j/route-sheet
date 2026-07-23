@@ -91,6 +91,19 @@ These four rules make selection on a candidate-list row **deterministic** — th
 
 **Shipping router changes (fast-track).** Policy edits, catalog mirrors, proving-outcome logs, and cell flips ship as PRs to the ruleset-protected `main` (audit trail) on a **fast track — no required review, no wait for a separate merge request**: the coordinator opens the PR and self-merges (squash) immediately. The `main` ruleset enforces the flow (require-PR + no force-push/deletion) without gating on review or thread-resolution; advisory bot review may comment but never blocks. The one carve-out: a **cell state-change** (`❓→✅` / `✅→❌`) still gets the maintainer's §3 decision sign-off — surfaced for a yes — after which its flip PR fast-tracks like the rest.
 
+### Challenger seeding — reopening a cell when the candidate set changes
+
+`✅` means "incumbent proven," never "competition over." When the candidate set changes, `bin/challenger_seeding.py` **proposes** `❓` seeds into matching §2 rows — it is **emit-only** (mirrors `bin/openrouter_discovery.py`): it prints pasteable proposal lines the maintainer approves, and **never writes the policy file**. An approved seed becomes a `❓` candidate in the row and flows through `route_pick`'s existing trial path (§3 R5–R6, bake-off window) — no new cell state, no new routing branch.
+
+Four triggers each propose one `❓` seed:
+
+- **New catalog model** whose task-fit tag matches an existing shape row.
+- **Plausible-untested candidate** — a catalog model whose task-fit tags intersect a row but which is absent from that row's candidate list.
+- **Materially-changed `❌`** — a candidate currently `❌` whose catalog entry shows a new version → a re-try seed.
+- **Stale `✅`** — a `✅` cell whose most recent evidence (cell `last` date, or a ledger record date when available) is older than the staleness age (**90 days, provisional — KTD7**).
+
+"Plausibly serve" v1 = the catalog's per-model task-fit tags (the "Best for" data) intersected with the shape row; the mapping is kept **narrow** — no proposal beats flooding. Dedup is by canonical key (the OpenRouter naming-reconciliation lesson): a model already holding any state in a row gets no duplicate proposal, and a new model with no matching shape gets none. Seeds are sign-off-gated exactly like a flip — the flywheel (§4, R0-gated) may also surface them, but the maintainer disposes.
+
 ---
 
 ## 4. Evidence rules
