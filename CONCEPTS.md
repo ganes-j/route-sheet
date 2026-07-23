@@ -94,6 +94,21 @@ The gate on the flywheel's *automated* proposals: it stays dry-run until routing
 ### Dual flip-authorization
 The two paths a cell flip can take (the "R0 fork"): the flywheel's automated proposal (R0-gated) *or* the maintainer's direct sign-off on 2+ clean outcomes (not R0-gated). Cell correctness is independent of router adoption, so real evidence can flip a cell even at R0 0/3.
 
+### Wrap-up bake-off
+The measurement step at `ce-work` unit completion: candidate executors replay the just-finished unit from its frozen spec in isolated worktrees, detached and headroom-adaptive, graded against the incumbent's shipped result. Builds the knowledge base without touching live routing.
+
+### Replay bundle
+What wrap-up capture saves so a unit can be replayed faithfully: the pre-unit base commit (the repo state the incumbent started from), the frozen spec and verify commands, and the incumbent's first-shot artifact kept separate from its shipped result.
+
+### Field record
+What a wrap-up bake-off writes: one entry per candidate raced on a unit — candidate, verify-pass, win margin vs the incumbent, date. The per-shape accumulation of field records is the knowledge base the flywheel reads.
+
+### Win margin
+The graded delta between a challenger's result and the incumbent's on the same unit, recorded in the field record. Replaces bare pass/fail so "local was close enough" is answerable later.
+
+### Challenger-eligible
+The marking on a `✅` cell whose candidate set changed — a new catalog model could serve its shape, a plausible candidate was never raced on it, or an `❌` executor materially improved. `route_pick` returns `trial` for such cells on low-stakes units. `✅` means "incumbent proven," never "competition over."
+
 ### Drift log
 The append-only §5 record of execution deviating from an assignment (circuit-breaker fallback, worker unavailable, coordinator override), with rationale. The flywheel reads it alongside outcomes; a repeated rationale is one rule-change proposal, not N cell tweaks.
 
