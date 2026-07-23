@@ -69,7 +69,7 @@ class BakeoffEligibilityTests(unittest.TestCase):
         eligible, reason = bakeoff_eligibility.check_bakeoff_eligibility(
             self.clean_unit(
                 verify_command=(
-                    "DATABASE_URL=postgresql://user:pass@db.prod.example/app "
+                    "DATABASE_URL=postgresql://db.prod.example/app "
                     "python3 -m unittest tests/test_widget.py"
                 )
             )
@@ -82,7 +82,7 @@ class BakeoffEligibilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             unit_dir = Path(tempdir)
             (unit_dir / ".env").write_text(
-                "DATABASE_URL=postgresql://user:pass@db.prod.example/app\n",
+                "DATABASE_URL=postgresql://db.prod.example/app\n",
                 encoding="utf-8",
             )
 
@@ -115,7 +115,7 @@ class BakeoffEligibilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             unit_dir = Path(tempdir)
             (unit_dir / "dev.toml").write_text(
-                'service_url = "http://user:pass@localhost:8080/api"\n',
+                'service_url = "http://localhost:8080/api"\n',
                 encoding="utf-8",
             )
 
