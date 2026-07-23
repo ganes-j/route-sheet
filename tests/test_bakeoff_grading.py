@@ -1,10 +1,15 @@
 """Tests for the bake-off runner grading + blinded pairwise judge (U4 + U5)."""
 
+import contextlib
+import io
+import importlib.machinery
 import importlib.util
+import json
 import random
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load(name):
@@ -15,8 +20,18 @@ def _load(name):
     return mod
 
 
+def _load_script(name):
+    path = Path(__file__).parents[1] / "bin" / name
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
 grading = _load("bakeoff_grading")
 field_records = _load("field_records")
+bakeoff = _load_script("bakeoff")
 
 
 def _unit(**overrides):
@@ -66,6 +81,270 @@ class ChallengerSelectionTests(unittest.TestCase):
             self.assertEqual(outcome.skipped_reason, "no eligible challengers")
             self.assertFalse(ledger.exists())
             self.assertTrue(any("no eligible challengers" in m for m in logs))
+
+
+class SweepFilterTests(unittest.TestCase):
+    SINGLE_SHOT_SHAPES = {
+        "batch-extraction (text/json)",
+        "pii-batch classification",
+        "vision / ocr batch",
+    }
+
+    def test_live_database_verify_is_skipped_with_gate_reason(self):
+        unit = _unit(
+            base_commit="abc123",
+            verify_command="psql postgresql://db.example.com/app -c 'select 1'",
+        )
+
+        replayable, skipped = grading.sweep_filter(
+            [unit],
+            single_shot_shapes=self.SINGLE_SHOT_SHAPES,
+        )
+
+        self.assertEqual(replayable, [])
+        self.assertEqual(
+            skipped,
+            [
+                (
+                    "U-demo",
+                    "verify-command-live-service: "
+                    "non-localhost service dependency",
+                )
+            ],
+        )
+
+    def test_missing_base_commit_is_skipped_as_unreplayable(self):
+        replayable, skipped = grading.sweep_filter(
+            [_unit(base_commit=None)],
+            single_shot_shapes=self.SINGLE_SHOT_SHAPES,
+        )
+
+        self.assertEqual(replayable, [])
+        self.assertEqual(
+            skipped,
+            [
+                (
+                    "U-demo",
+                    "unreplayable: no base commit (pre-capture history)",
+                )
+            ],
+        )
+
+    def test_eligible_single_shot_unit_is_replayable(self):
+        unit = _unit(base_commit="abc123")
+
+        replayable, skipped = grading.sweep_filter(
+            [unit],
+            single_shot_shapes=self.SINGLE_SHOT_SHAPES,
+        )
+
+        self.assertEqual(replayable, [unit])
+        self.assertEqual(skipped, [])
+
+    def test_missing_base_precedes_deferred_shape_reason(self):
+        deferred = _unit(
+            unit_ref="U-impl",
+            shape="impl-from-frozen-spec",
+            base_commit="abc123",
+        )
+        pre_capture = dict(deferred, unit_ref="U-old", base_commit=None)
+
+        replayable, skipped = grading.sweep_filter(
+            [deferred, pre_capture],
+            single_shot_shapes=self.SINGLE_SHOT_SHAPES,
+        )
+
+        self.assertEqual(replayable, [])
+        self.assertEqual(
+            skipped,
+            [
+                (
+                    "U-impl",
+                    "impl-shaped replay deferred pending U9 harness spike",
+                ),
+                (
+                    "U-old",
+                    "unreplayable: no base commit (pre-capture history)",
+                ),
+            ],
+        )
+
+
+class SweepDriverTests(unittest.TestCase):
+    def test_sweep_joins_manifest_and_replays_bundle_with_frozen_spec(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            manifest = root / "sample-routing.md"
+            manifest.write_text(
+                "## Assignments\n"
+                "- U6 → llocal:qwen3.5 — batch-extraction: rows "
+                "— load-bearing check: `python3 check.py`\n"
+                "- U7 → llocal:qwen3.5 — batch-extraction: rows "
+                "— load-bearing check: `python3 check.py`\n"
+                "- U8 → coordinator — spec-writing-as-the-work "
+                "— load-bearing check: n/a\n"
+                "- U9 → llocal:qwen3.5 batch-extraction malformed row\n"
+                "\n## Execution log\n"
+                "U6 · llocal:qwen3.5 · PASS · re-check green "
+                "· 0 fix rounds · session · 2026-07-23 · base:def456\n"
+                "U7 · llocal:qwen3.5 · PASS · re-check green "
+                "· 0 fix rounds · session · 2026-07-23 · base:abc123\n"
+                "U8 · coordinator · PASS · re-check n/a "
+                "· 0 fix rounds · na · 2026-07-23\n"
+                "U9 · llocal:qwen3.5 · PASS · re-check green "
+                "· 0 fix rounds · session · 2026-07-23 · base:bad999\n"
+                "U10 · llocal:qwen3.5 · PASS · re-check green "
+                "· 0 fix rounds · session · 2026-07-23 · base:missing1\n",
+                encoding="utf-8",
+            )
+            failed_bundle_dir = root / "bundles" / "U6"
+            failed_bundle_dir.mkdir(parents=True)
+            (failed_bundle_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "unit_ref": "U6",
+                        "base_commit": "def456",
+                        "verify_commands": ["python3 check.py"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (failed_bundle_dir / "spec.md").write_text(
+                "first replay fails",
+                encoding="utf-8",
+            )
+            bundle_dir = root / "bundles" / "U7"
+            bundle_dir.mkdir(parents=True)
+            (bundle_dir / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "unit_ref": "U7",
+                        "base_commit": "abc123",
+                        "verify_commands": ["python3 check.py"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (bundle_dir / "spec.md").write_text(
+                "classify these rows",
+                encoding="utf-8",
+            )
+
+            calls = []
+            real_root = bakeoff.DEFAULT_BUNDLE_ROOT
+            real_grade = bakeoff.grading.grade_replay
+            bakeoff.DEFAULT_BUNDLE_ROOT = root / "bundles"
+
+            def fake_grade(unit, meta, challengers, **kwargs):
+                calls.append((unit, meta, challengers, kwargs))
+                if unit["unit_ref"] == "U6":
+                    raise OSError("read-only output")
+                return bakeoff.grading.ReplayOutcome([{"unit_ref": "U7"}], None)
+
+            bakeoff.grading.grade_replay = fake_grade
+            args = SimpleNamespace(
+                sweep=str(manifest),
+                ledger=str(root / "ledger.jsonl"),
+                challengers="qwen3.5",
+                judge_model="qwen2.5:7b",
+                runner_log=None,
+            )
+            try:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = bakeoff.cmd_sweep(args)
+            finally:
+                bakeoff.DEFAULT_BUNDLE_ROOT = real_root
+                bakeoff.grading.grade_replay = real_grade
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 2)
+        unit, meta, challengers, kwargs = calls[1]
+        self.assertEqual(unit["base_commit"], "abc123")
+        self.assertEqual(meta["spec"], "classify these rows")
+        self.assertEqual(challengers, ["llocal:qwen3.5"])
+        self.assertEqual(kwargs["base_commit"], "abc123")
+        self.assertIn(
+            "SKIP U8: unreplayable: no base commit (pre-capture history)",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "SKIP U6: replay failed: read-only output",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "SKIP U9: unreplayable: assignment row could not be parsed",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "SKIP U10: unreplayable: no assignment row",
+            output.getvalue(),
+        )
+        self.assertIn("wrote 1 field record(s)", output.getvalue())
+
+    def test_sweep_and_run_modes_are_mutually_exclusive(self):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as raised:
+                bakeoff.main(["--sweep", "*.md", "run", "bundle"])
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--sweep cannot be combined with run", errors.getvalue())
+
+    def test_run_accepts_shared_options_before_or_after_subcommand(self):
+        captured = []
+        real_run = bakeoff.cmd_run
+        bakeoff.cmd_run = lambda args: captured.append(args) or 0
+        try:
+            self.assertEqual(
+                bakeoff.main(["--ledger", "before.jsonl", "run", "bundle"]),
+                0,
+            )
+            self.assertEqual(
+                bakeoff.main(["run", "bundle", "--ledger", "after.jsonl"]),
+                0,
+            )
+        finally:
+            bakeoff.cmd_run = real_run
+
+        self.assertEqual(
+            [args.ledger for args in captured],
+            ["before.jsonl", "after.jsonl"],
+        )
+
+    def test_bundle_validation_rejects_stale_or_unsafe_metadata(self):
+        unit = _unit(base_commit="abc123")
+        valid_meta = {
+            "unit_ref": "U-demo",
+            "base_commit": "abc123",
+            "verify_commands": [unit["verify_command"]],
+        }
+
+        self.assertIsNone(bakeoff._bundle_skip_reason(unit, valid_meta))
+        self.assertEqual(
+            bakeoff._bundle_skip_reason(unit, []),
+            "unreplayable: replay bundle metadata is not an object",
+        )
+        self.assertEqual(
+            bakeoff._bundle_skip_reason(
+                unit,
+                dict(valid_meta, base_commit="stale"),
+            ),
+            "unreplayable: replay bundle base commit does not match manifest",
+        )
+        self.assertEqual(
+            bakeoff._bundle_skip_reason(
+                unit,
+                dict(
+                    valid_meta,
+                    verify_commands=[
+                        unit["verify_command"],
+                        "psql postgresql://db.example.com/app -c 'select 1'",
+                    ],
+                ),
+            ),
+            "verify-command-live-service: non-localhost service dependency",
+        )
 
 
 class GradeReplayTests(unittest.TestCase):

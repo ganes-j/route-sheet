@@ -9,7 +9,7 @@ local judge model for the pairwise margin.
 
   bakeoff run BUNDLE_DIR [--ledger PATH] [--challengers m1,m2]
        [--judge-model MODEL] [--detach]
-  bakeoff --sweep MANIFEST_GLOB [...]     # U10, added later
+  bakeoff --sweep MANIFEST_GLOB [...]
 
 The runner is single-shot only (batch-extraction / vision-OCR — shapes llocal
 already runs); implementation-unit replay is gated behind the U9 harness spike.
@@ -18,9 +18,11 @@ with the user's Ollama use.
 """
 
 import argparse
+import glob
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,9 +38,47 @@ def _load_sibling(name):
 
 
 grading = _load_sibling("bakeoff_grading")
+field_records = _load_sibling("field_records")
 
 LLOCAL = Path(__file__).with_name("llocal")
 DEFAULT_LEDGER = Path("~/.claude/router-field-records.jsonl").expanduser()
+DEFAULT_BUNDLE_ROOT = Path("~/.claude/router-replay-bundles").expanduser()
+SINGLE_SHOT_SHAPES = {
+    "batch-extraction (text/json)",
+    "pii-batch classification",
+    "vision / ocr batch",
+}
+_ASSIGNMENT_RE = re.compile(
+    r"^-\s*(?P<unit_ref>U[0-9A-Za-z_.-]+)\s*→\s*"
+    r"(?P<executor>[^\s[(]+).*?\s+—\s+(?P<body>.+)$"
+)
+_UNIT_REF_RE = re.compile(r"^U[0-9A-Za-z_.-]+$")
+_ASSIGNMENT_UNIT_RE = re.compile(
+    r"^-\s*(?P<unit_ref>U[0-9A-Za-z_.-]+)\s*→"
+)
+_SHAPE_HINTS = (
+    ("pii-batch classification", ("pii-batch classification", "pii batch")),
+    ("vision / ocr batch", ("vision / ocr", "vision/ocr", "ocr batch")),
+    (
+        "batch-extraction (text/json)",
+        ("batch-extraction", "batch extraction"),
+    ),
+    ("impl-from-frozen-spec", ("impl-from-frozen-spec", "frozen-spec impl")),
+    ("bugfix-with-known-repro", ("bugfix-with-known-repro", "known repro")),
+    ("mechanical-refactor", ("mechanical-refactor", "mechanical refactor")),
+    ("ci/dep/test-bulk", ("ci/dep/test-bulk", "test-bulk")),
+    ("huge-context sweep", ("huge-context sweep",)),
+    (
+        "adversarial / second-opinion review",
+        ("adversarial / second-opinion review", "second-opinion review"),
+    ),
+    (
+        'large-context code read / "where is x"',
+        ("large-context code read", '"where is x"'),
+    ),
+    ("spec-writing-as-the-work", ("spec-writing-as-the-work",)),
+    ("verification/review gate", ("verification gate", "review gate")),
+)
 
 
 def _log(runner_log):
@@ -143,6 +183,210 @@ def _detach():
     sys.exit(0)
 
 
+def _shape_from_reason(reason):
+    normalized = reason.lower()
+    for shape, hints in _SHAPE_HINTS:
+        if any(hint in normalized for hint in hints):
+            return shape
+    return normalized
+
+
+def _parse_assignment(line):
+    match = _ASSIGNMENT_RE.match(line.strip())
+    if match is None:
+        return None
+    body = match.group("body")
+    reason, marker, verify_command = body.rpartition(
+        " — load-bearing check: "
+    )
+    if not marker:
+        reason, verify_command = body, None
+    elif verify_command.strip().lower() == "n/a":
+        verify_command = None
+    elif verify_command.startswith("`") and verify_command.endswith("`"):
+        verify_command = verify_command[1:-1]
+
+    lowered_reason = reason.lower()
+    pii_bound = (
+        "pii" in lowered_reason
+        and "no pii" not in lowered_reason
+        and "non-pii" not in lowered_reason
+    )
+    return {
+        "unit_ref": match.group("unit_ref"),
+        "executor": match.group("executor"),
+        "shape": _shape_from_reason(reason),
+        "verify_command": verify_command,
+        "pii_bound": pii_bound,
+        "base_commit": None,
+    }
+
+
+def _parse_manifest(manifest_path):
+    assignments = {}
+    outcomes = {}
+    section = None
+    with manifest_path.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            stripped = raw_line.strip()
+            if stripped == "## Assignments":
+                section = "assignments"
+                continue
+            if stripped == "## Execution log":
+                section = "execution"
+                continue
+            if stripped.startswith("## "):
+                section = None
+                continue
+            if section == "assignments":
+                assignment_match = _ASSIGNMENT_UNIT_RE.match(stripped)
+                unit = _parse_assignment(raw_line)
+                if assignment_match is not None:
+                    unit_ref = assignment_match.group("unit_ref")
+                    assignments[unit_ref] = unit
+            elif section == "execution" and stripped:
+                outcome = field_records.parse_outcome_line(raw_line)
+                if outcome.unit_ref and _UNIT_REF_RE.fullmatch(outcome.unit_ref):
+                    outcomes[outcome.unit_ref] = outcome
+
+    units = []
+    skipped = []
+    for unit_ref, outcome in outcomes.items():
+        if unit_ref not in assignments:
+            skipped.append((unit_ref, "unreplayable: no assignment row"))
+            continue
+        unit = assignments[unit_ref]
+        if unit is None:
+            skipped.append(
+                (unit_ref, "unreplayable: assignment row could not be parsed")
+            )
+            continue
+        unit["base_commit"] = outcome.base_commit
+        unit["outcome_date"] = outcome.date
+        units.append(unit)
+    return units, skipped
+
+
+def _candidate_executors(challengers):
+    if challengers:
+        return [
+            candidate if candidate.startswith("llocal") else f"llocal:{candidate}"
+            for candidate in challengers.split(",")
+        ]
+    return [f"llocal:{model}" for model in _installed_local_models()]
+
+
+def _bundle_skip_reason(unit, meta):
+    if not isinstance(meta, dict):
+        return "unreplayable: replay bundle metadata is not an object"
+    if meta.get("unit_ref") != unit["unit_ref"]:
+        return "unreplayable: replay bundle unit_ref does not match manifest"
+    if meta.get("base_commit") != unit["base_commit"]:
+        return "unreplayable: replay bundle base commit does not match manifest"
+
+    verify_commands = meta.get("verify_commands")
+    if not isinstance(verify_commands, list) or (
+        unit["verify_command"] not in verify_commands
+    ):
+        return "unreplayable: replay bundle verify command does not match manifest"
+    for verify_command in verify_commands:
+        actual_unit = dict(unit, verify_command=verify_command)
+        replayable, skipped = grading.sweep_filter(
+            [actual_unit],
+            single_shot_shapes=SINGLE_SHOT_SHAPES,
+        )
+        if not replayable:
+            return skipped[0][1]
+    return None
+
+
+def cmd_sweep(args):
+    pattern = str(Path(args.sweep).expanduser())
+    manifests = [
+        Path(path) for path in sorted(glob.glob(pattern, recursive=True))
+        if Path(path).is_file()
+    ]
+    if not manifests:
+        print(f"SKIP sweep: no manifests matched {args.sweep}")
+    units = []
+    parse_skips = []
+    for manifest_path in manifests:
+        try:
+            manifest_units, manifest_skips = _parse_manifest(manifest_path)
+            units.extend(manifest_units)
+            parse_skips.extend(manifest_skips)
+        except OSError as exc:
+            print(f"SKIP {manifest_path}: unreadable manifest: {exc}")
+
+    replayable, skipped = grading.sweep_filter(
+        units,
+        single_shot_shapes=SINGLE_SHOT_SHAPES,
+    )
+    for unit_ref, reason in parse_skips + skipped:
+        print(f"SKIP {unit_ref}: {reason}")
+
+    log = _log(args.runner_log)
+    candidates = None
+    records_written = 0
+    for unit in replayable:
+        bundle_dir = DEFAULT_BUNDLE_ROOT / unit["unit_ref"]
+        meta_path = bundle_dir / "meta.json"
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            print(f"SKIP {unit['unit_ref']}: unreplayable: replay bundle not found")
+            continue
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"SKIP {unit['unit_ref']}: unreadable replay bundle: {exc}")
+            continue
+        bundle_skip_reason = _bundle_skip_reason(unit, meta)
+        if bundle_skip_reason:
+            print(f"SKIP {unit['unit_ref']}: {bundle_skip_reason}")
+            continue
+        try:
+            spec_path = bundle_dir / "spec.md"
+            spec = spec_path.read_text(encoding="utf-8")
+            meta = dict(meta, spec=spec)
+            first_shot_path = bundle_dir / "first_shot.patch"
+        except OSError as exc:
+            print(f"SKIP {unit['unit_ref']}: unreadable replay bundle: {exc}")
+            continue
+        try:
+            first_shot = first_shot_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            first_shot = None
+        except OSError as exc:
+            print(f"SKIP {unit['unit_ref']}: unreadable replay bundle: {exc}")
+            continue
+
+        if candidates is None:
+            candidates = _candidate_executors(args.challengers)
+        challengers = grading.select_challengers(unit, candidates)
+        try:
+            outcome = grading.grade_replay(
+                unit, meta, challengers,
+                ledger_path=args.ledger,
+                run_fn=_make_run_fn(log),
+                verify_fn=_make_verify_fn(bundle_dir, log),
+                judge_fn=_make_judge_fn(args.judge_model, log),
+                incumbent_first_shot=first_shot,
+                spec=spec,
+                shape=unit["shape"],
+                base_commit=unit["base_commit"],
+                date=unit.get("outcome_date") or time.strftime("%Y-%m-%d"),
+                log_fn=log,
+            )
+        except OSError as exc:
+            print(f"SKIP {unit['unit_ref']}: replay failed: {exc}")
+            continue
+        records_written += len(outcome.records_written)
+        if outcome.skipped_reason:
+            print(f"SKIP {unit['unit_ref']}: {outcome.skipped_reason}")
+
+    print(f"wrote {records_written} field record(s)")
+    return 0
+
+
 def cmd_run(args):
     if args.detach:
         _detach()
@@ -156,19 +400,14 @@ def cmd_run(args):
     spec = (bundle_dir / "spec.md").read_text(encoding="utf-8") if (
         bundle_dir / "spec.md"
     ).exists() else ""
+    meta = dict(meta, spec=spec)
     first_shot = None
     if (bundle_dir / "first_shot.patch").exists():
         first_shot = (bundle_dir / "first_shot.patch").read_text(encoding="utf-8")
 
     log = _log(args.runner_log or (bundle_dir / "runner.log"))
 
-    if args.challengers:
-        candidates = [
-            c if c.startswith("llocal") else f"llocal:{c}"
-            for c in args.challengers.split(",")
-        ]
-    else:
-        candidates = [f"llocal:{m}" for m in _installed_local_models()]
+    candidates = _candidate_executors(args.challengers)
 
     unit = {
         "unit_ref": meta.get("unit_ref", bundle_dir.name),
@@ -202,20 +441,37 @@ def cmd_run(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Detached bake-off runner.")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap.add_argument(
+        "--sweep",
+        metavar="MANIFEST_GLOB",
+        help="replay eligible completed manifest units and print reasoned skips",
+    )
+    ap.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    ap.add_argument("--challengers", help="comma-separated model list override")
+    ap.add_argument("--judge-model", dest="judge_model", default="qwen2.5:7b")
+    ap.add_argument("--runner-log", dest="runner_log")
+    sub = ap.add_subparsers(dest="cmd")
 
     pr = sub.add_parser("run", help="replay one bundle against challengers")
     pr.add_argument("bundle_dir")
-    pr.add_argument("--ledger", default=str(DEFAULT_LEDGER))
-    pr.add_argument("--challengers", help="comma-separated model list override")
-    pr.add_argument("--judge-model", dest="judge_model", default="qwen2.5:7b")
+    pr.add_argument("--ledger", default=argparse.SUPPRESS)
+    pr.add_argument("--challengers", default=argparse.SUPPRESS)
+    pr.add_argument(
+        "--judge-model", dest="judge_model", default=argparse.SUPPRESS
+    )
     pr.add_argument("--shape", default="batch-extraction (text/json)")
     pr.add_argument("--pii-bound", dest="pii_bound", action="store_true")
-    pr.add_argument("--runner-log", dest="runner_log")
+    pr.add_argument("--runner-log", dest="runner_log", default=argparse.SUPPRESS)
     pr.add_argument("--detach", action="store_true")
     pr.set_defaults(func=cmd_run)
 
     args = ap.parse_args(argv)
+    if args.sweep and hasattr(args, "func"):
+        ap.error("--sweep cannot be combined with run")
+    if args.sweep:
+        return cmd_sweep(args)
+    if not hasattr(args, "func"):
+        ap.error("one of --sweep or run is required")
     return args.func(args)
 
 

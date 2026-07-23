@@ -62,6 +62,40 @@ def concurrency_for_headroom(live_session_active: bool, ceiling: int = 1) -> int
     return max(1, ceiling)
 
 
+def sweep_filter(
+    units: Sequence[Mapping[str, Any]],
+    *,
+    single_shot_shapes: set[str],
+) -> tuple[list[Mapping[str, Any]], list[tuple[str, str]]]:
+    """Partition historical units into replayable descriptors and reasoned skips."""
+    replayable = []
+    skipped = []
+    for unit in units:
+        unit_ref = unit.get("unit_ref", "unknown")
+        if not unit.get("base_commit"):
+            skipped.append(
+                (
+                    unit_ref,
+                    "unreplayable: no base commit (pre-capture history)",
+                )
+            )
+            continue
+        if unit.get("shape") not in single_shot_shapes:
+            skipped.append(
+                (
+                    unit_ref,
+                    "impl-shaped replay deferred pending U9 harness spike",
+                )
+            )
+            continue
+        eligible, reason = bakeoff_eligibility.check_bakeoff_eligibility(unit)
+        if not eligible:
+            skipped.append((unit_ref, reason))
+            continue
+        replayable.append(unit)
+    return replayable, skipped
+
+
 # --- Blinded pairwise judge (U5) --------------------------------------------
 
 
