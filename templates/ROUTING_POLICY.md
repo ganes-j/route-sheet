@@ -174,7 +174,16 @@ U6 · codex-implementer · PASS · re-check `pnpm test seeding` green · 0 fix r
 
 ### Replay-bundle capture (feeds the bake-off runner)
 
-When a routed unit completes, the same wrap-up step that writes its outcome line MAY capture a **replay bundle** — the frozen inputs a challenger needs to re-run the unit later. Capture is what earns the trailing `base:<sha>` token; a unit with no bundle simply omits it.
+When a **replay-eligible** unit completes, the same wrap-up step that writes its outcome line captures a **replay bundle** — the frozen inputs a challenger needs to re-run the unit later — by invoking:
+
+```
+bakeoff capture --unit-ref U<N> --namespace <plan-basename> --base-commit <pre-unit sha> \
+  --spec-file <frozen spec> --verify-cmd <load-bearing check> [--first-shot-file <incumbent first output/diff>]
+```
+
+`<plan-basename>` is the plan filename without `.md` (e.g. `2026-07-23-002-feat-...-plan`); the SessionEnd sweep derives the same key from the manifest name (`<name>-routing.md` → `<name>`), so capture and sweep agree on the bundle path. Capture is what earns the trailing `base:<sha>` token; a unit with no bundle simply omits it.
+
+**Scope (single-shot only, today).** Capture fires for units the shipped runner can actually replay — single-shot llocal-native shapes (batch-extraction, PII-batch, vision/OCR). Implementation-unit capture (saving the incumbent's first-shot **diff** for an agentic replay) is deferred to the U9 harness track; codex-dispatch impl units skip capture until then (the sweep would skip them anyway). A wrap-up that cannot capture logs a skip rather than failing the unit.
 
 A bundle is a directory keyed by unit ref **under a per-plan namespace** (default root `~/.claude/router-replay-bundles/`, configurable) — `U1` is reused by nearly every plan, so `write_bundle` takes a `namespace` (a plan/repo-unique key) to keep captures from colliding; both components are validated as safe single path segments. It holds:
 
@@ -182,7 +191,7 @@ A bundle is a directory keyed by unit ref **under a per-plan namespace** (defaul
 - `spec.md` — the frozen spec the unit was built from;
 - `first_shot.patch` — the incumbent's **first** diff, pre-fix-rounds, kept separate from its shipped result. Missing → the bundle is `margin_limited` (the runner degrades to verify-only grading), **not rejected**.
 
-`bin/field_records.py:write_bundle()` writes this layout. Before writing, it runs `scan_bundle_content()` — the **structural** patterns of `scripts/leak-check.sh` (absolute home paths, credential-shaped URLs, UUID-shaped ids) — over every bundle file; a hit **refuses** the write and logs the reason. (leak-check.sh's gitignored term-blocklist scan stays the U11 push-time gate over tracked files; bundle content is transient and only the structural patterns apply.)
+`bin/field_records.py:write_bundle()` writes this layout. Before writing, it runs `scan_bundle_content()` — the **structural** patterns of `scripts/leak-check.sh` (absolute home paths, credential-shaped URLs, UUID-shaped ids) — over every bundle file; a hit **refuses** the write and logs the reason. (leak-check.sh's gitignored term-blocklist scan stays the push-time gate over tracked files; bundle content is transient and only the structural patterns apply.)
 
 The outcome line and the bundle are written at the same moment, so `base:<sha>` in the line and the bundle dir stay consistent. `parse_outcome_line()` in the same module recovers the base commit label-first for readers that want it.
 
