@@ -250,6 +250,9 @@ class BundleResult(NamedTuple):
     refused_reason: str | None
 
 
+_BUNDLE_KEY_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_.-]*$")
+
+
 def write_bundle(
     root: str | Path,
     unit_ref: str,
@@ -258,20 +261,37 @@ def write_bundle(
     spec: str,
     verify_commands: Sequence[str],
     first_shot_patch: str | None = None,
+    namespace: str | None = None,
 ) -> BundleResult:
     """Write a replay bundle for ``unit_ref`` under ``root``.
 
     Layout::
 
-        <root>/<unit_ref>/meta.json          base_commit, verify_commands, margin_limited
-        <root>/<unit_ref>/spec.md            frozen spec
-        <root>/<unit_ref>/first_shot.patch   incumbent's first diff (when present)
+        <root>/[<namespace>/]<unit_ref>/meta.json   base_commit, verify_commands, margin_limited
+        <root>/[<namespace>/]<unit_ref>/spec.md      frozen spec
+        <root>/[<namespace>/]<unit_ref>/first_shot.patch   incumbent's first diff (when present)
+
+    ``unit_ref`` alone is NOT unique — nearly every plan has a ``U1`` — so a
+    ``namespace`` (a plan/repo-unique key) SHOULD be passed to keep bundles from
+    colliding across plans. Both ``namespace`` and ``unit_ref`` are validated as
+    single safe path components (no traversal); a value that would escape ``root``
+    refuses the write.
 
     A missing first-shot artifact does NOT reject the bundle: it is marked
-    ``margin_limited`` (U4 degrades to verify-only grading). A structural-secret
-    hit in any bundle content REFUSES the write and reports the reason; nothing
-    is written.
+    ``margin_limited`` (U4 degrades to verify-only grading), and any stale
+    ``first_shot.patch`` from a prior capture is removed so the runner never grades
+    against a wrong incumbent. A structural-secret hit in any bundle content
+    REFUSES the write and reports the reason; nothing is written.
     """
+    for component in ([namespace] if namespace is not None else []) + [unit_ref]:
+        if not _BUNDLE_KEY_RE.match(component or ""):
+            return BundleResult(
+                written=False,
+                path=None,
+                margin_limited=False,
+                refused_reason=f"unsafe bundle path component: {component!r}",
+            )
+
     hits = scan_bundle_content(
         [spec, first_shot_patch, *verify_commands]
     )
@@ -284,11 +304,13 @@ def write_bundle(
         )
 
     margin_limited = first_shot_patch is None
-    bundle_dir = Path(root).expanduser() / unit_ref
+    root_dir = Path(root).expanduser()
+    bundle_dir = root_dir / namespace / unit_ref if namespace else root_dir / unit_ref
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     meta = {
         "unit_ref": unit_ref,
+        "namespace": namespace,
         "base_commit": base_commit,
         "verify_commands": list(verify_commands),
         "margin_limited": margin_limited,
@@ -298,10 +320,11 @@ def write_bundle(
         encoding="utf-8",
     )
     (bundle_dir / "spec.md").write_text(spec, encoding="utf-8")
+    patch_path = bundle_dir / "first_shot.patch"
     if first_shot_patch is not None:
-        (bundle_dir / "first_shot.patch").write_text(
-            first_shot_patch, encoding="utf-8"
-        )
+        patch_path.write_text(first_shot_patch, encoding="utf-8")
+    else:
+        patch_path.unlink(missing_ok=True)
 
     return BundleResult(
         written=True,

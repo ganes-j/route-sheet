@@ -176,7 +176,7 @@ U6 · codex-implementer · PASS · re-check `pnpm test seeding` green · 0 fix r
 
 When a routed unit completes, the same wrap-up step that writes its outcome line MAY capture a **replay bundle** — the frozen inputs a challenger needs to re-run the unit later. Capture is what earns the trailing `base:<sha>` token; a unit with no bundle simply omits it.
 
-A bundle is a directory keyed by unit ref (default root `~/.claude/router-replay-bundles/`, configurable) holding:
+A bundle is a directory keyed by unit ref **under a per-plan namespace** (default root `~/.claude/router-replay-bundles/`, configurable) — `U1` is reused by nearly every plan, so `write_bundle` takes a `namespace` (a plan/repo-unique key) to keep captures from colliding; both components are validated as safe single path segments. It holds:
 
 - `meta.json` — the pre-unit `base_commit`, the unit's `verify_commands`, and a `margin_limited` flag;
 - `spec.md` — the frozen spec the unit was built from;

@@ -217,6 +217,48 @@ class ReplayBundleTests(unittest.TestCase):
         self.assertIn("credential-shaped URL", result.refused_reason)
         self.assertFalse((self.root / "U9").exists())
 
+    def test_traversal_unit_ref_is_refused(self):
+        result = field_records.write_bundle(
+            self.root,
+            "../../tmp/evil",
+            base_commit="abc",
+            spec="x",
+            verify_commands=["true"],
+            first_shot_patch=None,
+        )
+        self.assertFalse(result.written)
+        self.assertIn("unsafe bundle path component", result.refused_reason)
+        self.assertFalse((self.root.parent / "tmp" / "evil").exists())
+
+    def test_namespace_prevents_same_unit_ref_collision(self):
+        a = field_records.write_bundle(
+            self.root, "U1", base_commit="p1", spec="plan-one",
+            verify_commands=["true"], first_shot_patch="patch-1\n",
+            namespace="plan-alpha",
+        )
+        b = field_records.write_bundle(
+            self.root, "U1", base_commit="p2", spec="plan-two",
+            verify_commands=["true"], first_shot_patch="patch-2\n",
+            namespace="plan-beta",
+        )
+        self.assertTrue(a.written and b.written)
+        self.assertNotEqual(a.path, b.path)
+        self.assertEqual((a.path / "spec.md").read_text(encoding="utf-8"), "plan-one")
+        self.assertEqual((b.path / "spec.md").read_text(encoding="utf-8"), "plan-two")
+
+    def test_recapture_without_first_shot_removes_stale_patch(self):
+        first = field_records.write_bundle(
+            self.root, "U4", base_commit="c1", spec="s",
+            verify_commands=["true"], first_shot_patch="original\n",
+        )
+        self.assertTrue((first.path / "first_shot.patch").exists())
+        again = field_records.write_bundle(
+            self.root, "U4", base_commit="c2", spec="s",
+            verify_commands=["true"], first_shot_patch=None,
+        )
+        self.assertTrue(again.margin_limited)
+        self.assertFalse((again.path / "first_shot.patch").exists())
+
 
 class OutcomeLineParserTests(unittest.TestCase):
     def test_parses_line_without_base_token(self):

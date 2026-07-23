@@ -123,8 +123,10 @@ def _make_run_fn(log):
             )
             return out.stdout
         except (subprocess.SubprocessError, OSError) as exc:
-            log(f"run_fn error for {executor}: {exc}")
-            return ""
+            # None = infrastructure failure (distinct from empty model output);
+            # grade_replay skips the record so an outage isn't logged as a loss.
+            log(f"run_fn infrastructure error for {executor}: {exc}")
+            return None
 
     return run_fn
 
@@ -143,8 +145,10 @@ def _make_verify_fn(bundle_dir, log):
                     capture_output=True, text=True, timeout=600,
                 )
             except (subprocess.SubprocessError, OSError) as exc:
-                log(f"verify error: {exc}")
-                return False
+                # None = the verify command could not RUN (infra), distinct from
+                # a command that ran and failed (returncode != 0 → genuine False).
+                log(f"verify infrastructure error: {exc}")
+                return None
             if result.returncode != 0:
                 return False
         return True
@@ -308,6 +312,7 @@ def cmd_sweep(args):
     ]
     if not manifests:
         print(f"SKIP sweep: no manifests matched {args.sweep}")
+        return 0
     units = []
     parse_skips = []
     for manifest_path in manifests:
@@ -396,7 +401,11 @@ def cmd_run(args):
     if not meta_path.exists():
         print(f"no meta.json in {bundle_dir}", file=sys.stderr)
         return 2
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"cannot read meta.json in {bundle_dir}: {exc}", file=sys.stderr)
+        return 2
     spec = (bundle_dir / "spec.md").read_text(encoding="utf-8") if (
         bundle_dir / "spec.md"
     ).exists() else ""
