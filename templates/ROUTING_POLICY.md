@@ -104,6 +104,23 @@ Four triggers each propose one `❓` seed:
 
 "Plausibly serve" v1 = the catalog's per-model task-fit tags (the "Best for" data) intersected with the shape row; the mapping is kept **narrow** — no proposal beats flooding. Dedup is by canonical key (the OpenRouter naming-reconciliation lesson): a model already holding any state in a row gets no duplicate proposal, and a new model with no matching shape gets none. Seeds are sign-off-gated exactly like a flip — the flywheel (§4, R0-gated) may also surface them, but the maintainer disposes.
 
+### Field-record evidence classes & the R19 decision threshold
+
+The field-record ledger (`~/.claude/router-field-records.jsonl`, configurable — machine-owned per KTD1, never these cells) is the flywheel's second read surface. What a record can *propose* depends on its `kind`:
+
+- **`real` / `fallback`** — a genuinely routed unit's outcome. **Flip-eligible**: counts toward `❓→✅` / `✅→❌` above. A routed unit's §6 manifest outcome line and its `real` ledger record are the **same event** — the flywheel dedups on `unit_ref` and counts it once.
+- **`replay`** — a bake-off replay (a challenger re-running a completed unit; §2 runner). **Eligibility only**: replay margins support a challenger-**seed** proposal, never a cell flip. Replay is directional evidence that a candidate *might* serve; flips still require real routed outcomes plus sign-off.
+- **`reverse-replay`** — an incumbent replayed for a margin (KTD4, spend-gated). Same eligibility-only class as `replay`.
+
+**R19 decision thresholds — provisional (KTD7), revisited at the first flywheel evaluation.** No proposal fires for a cell below the record floor:
+
+- **Minimum 5 records** per shape/candidate pair before any proposal.
+- **Margin band ±10%** counts as "similar" (neither candidate meaningfully ahead).
+- **Sampling: 100%** of eligible units (volume is scarce — sample everything).
+- **Staleness age: 90 days** (also drives §3 stale-`✅` seeding above).
+
+The floor is a real gate, not advice: below 5 records the flywheel proposes nothing for that pair. The threshold review fires at **5 records per pair or 6 weeks after the first ledger write, whichever comes first**, so the loop cannot stall silently under the floor. The R0 gate and sign-off flow are unchanged — R19 governs *how much evidence*, R0 governs *whether the automated proposer runs at all*.
+
 ---
 
 ## 4. Evidence rules
