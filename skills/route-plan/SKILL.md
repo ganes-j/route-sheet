@@ -48,8 +48,8 @@ Records the plan-time routing judgment beside the plan so execution can dispatch
 
    ## Execution log
    (one outcome line per routed unit, in the ROUTING_POLICY.md §6 canonical grammar:
-    `U<N> · <executor> · <PASS|FAIL|FALLBACK> · re-check <cmd|n/a> <green|red|n/a> · <N> fix rounds · <ref|na> · <YYYY-MM-DD>`.
-    codex-dispatch writes its own; the coordinator writes it for llocal/Claude-worker units after re-check. The flywheel reads this.)
+    `U<N> · <executor> · <PASS|FAIL|FALLBACK> · re-check <cmd|n/a> <green|red|n/a> · <N> fix rounds · <ref|na> · <YYYY-MM-DD> [· base:<sha>]`.
+    codex-dispatch writes its own; the coordinator writes it for llocal/Claude-worker units after re-check. The optional trailing `base:<sha>` token records the pre-unit base commit when a replay bundle was captured (§6). The flywheel reads this.)
    ```
 
    Each assignment carries the executor, a **discipline label**, a one-line reason, and — for anything dispatched — the **exact load-bearing check** the re-check will re-run (from the unit's Verification). The label is `[full]` (goal + verify command present) or `[bare: <why>]` (a minted or thin unit that cannot reach a write-worker, per the step-3 discipline floor). This is what `codex-dispatch` §4 consumes.

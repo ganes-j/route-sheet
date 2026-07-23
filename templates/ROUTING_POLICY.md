@@ -117,7 +117,7 @@ Every routed unit emits **one** outcome line when it completes. Writers (codex-d
 **Grammar** (single line, `·`-delimited — greppable, no parser needed):
 
 ```
-U<N> · <executor> · <PASS|FAIL|FALLBACK> · re-check <cmd|n/a> <green|red|n/a> · <N> fix rounds · <ref|na> · <YYYY-MM-DD>
+U<N> · <executor> · <PASS|FAIL|FALLBACK> · re-check <cmd|n/a> <green|red|n/a> · <N> fix rounds · <ref|na> · <YYYY-MM-DD> [· base:<sha>]
 ```
 
 - **`U<N>`** — the plan U-ID. For ad-hoc work with no plan, use a short slug (e.g. `adhoc:catalog-extract`).
@@ -127,6 +127,7 @@ U<N> · <executor> · <PASS|FAIL|FALLBACK> · re-check <cmd|n/a> <green|red|n/a>
 - **`<N> fix rounds`** — coordinator fix rounds after the worker's output before it passed (`0` = clean first try). A "clean" outcome for flip-counting (§3) = `PASS` with ≤1 fix round.
 - **`<ref>`** — Codex session-id, llocal batch id, or `na`.
 - **date** — `YYYY-MM-DD` the line was written (the reader treats a line as "new" if dated after the target cell's last-verified date).
+- **`base:<sha>`** *(optional, trailing)* — the pre-unit base commit, the repo state the executor started from. Written by every §6 writer when a replay bundle was captured (see **Replay-bundle capture** below); it is what lets the bake-off runner replay the unit faithfully. **Located by its `base:` label, never by position** — a reader that indexes the first seven fields is unaffected, and lines predating this token (no `base:`) stay valid. Absent → the unit is unreplayable (pre-capture history); the historical sweep skips it.
 
 **Required-field rules by executor class:**
 - **Write-workers** (`codex-implementer`, llocal batch, coordinator writes): `re-check` must carry a real command + result; `<N> fix rounds` required.
@@ -138,7 +139,22 @@ U2 · codex-implementer · PASS · re-check `pnpm test parser` green · 0 fix ro
 U5 · llocal:qwen3.5 · PASS · re-check spot-checked 12/12 items green · 1 fix rounds · batch-7f3 · 2026-07-21
 U3 · haiku-scout · PASS · re-check n/a n/a · 0 fix rounds · na · 2026-07-21
 U4 · codex-implementer · FALLBACK · re-check `pnpm build` red · 0 fix rounds · 01JXYZ…session · 2026-07-22
+U6 · codex-implementer · PASS · re-check `pnpm test seeding` green · 0 fix rounds · 01JABC…session · 2026-07-23 · base:ba3f924
 ```
+
+### Replay-bundle capture (feeds the bake-off runner)
+
+When a routed unit completes, the same wrap-up step that writes its outcome line MAY capture a **replay bundle** — the frozen inputs a challenger needs to re-run the unit later. Capture is what earns the trailing `base:<sha>` token; a unit with no bundle simply omits it.
+
+A bundle is a directory keyed by unit ref (default root `~/.claude/router-replay-bundles/`, configurable) holding:
+
+- `meta.json` — the pre-unit `base_commit`, the unit's `verify_commands`, and a `margin_limited` flag;
+- `spec.md` — the frozen spec the unit was built from;
+- `first_shot.patch` — the incumbent's **first** diff, pre-fix-rounds, kept separate from its shipped result. Missing → the bundle is `margin_limited` (the runner degrades to verify-only grading), **not rejected**.
+
+`bin/field_records.py:write_bundle()` writes this layout. Before writing, it runs `scan_bundle_content()` — the **structural** patterns of `scripts/leak-check.sh` (absolute home paths, credential-shaped URLs, UUID-shaped ids) — over every bundle file; a hit **refuses** the write and logs the reason. (leak-check.sh's gitignored term-blocklist scan stays the U11 push-time gate over tracked files; bundle content is transient and only the structural patterns apply.)
+
+The outcome line and the bundle are written at the same moment, so `base:<sha>` in the line and the bundle dir stay consistent. `parse_outcome_line()` in the same module recovers the base commit label-first for readers that want it.
 
 ---
 

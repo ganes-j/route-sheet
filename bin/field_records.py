@@ -9,11 +9,17 @@ Importable usage:
 
 The default ledger is ~/.claude/router-field-records.jsonl. Pass ``path``
 explicitly for tests, fixtures, and alternate ledgers.
+
+Also the shared home for the replay-bundle capture protocol (U2):
+    parse_outcome_line(line)      -> ParsedOutcome (tolerant of a trailing base: token)
+    scan_bundle_content(texts)   -> list of structural-secret hits
+    write_bundle(root, unit_ref, ...) -> BundleResult
 """
 
 import json
+import re
 from pathlib import Path
-from typing import Any, Mapping, NamedTuple
+from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 
 DEFAULT_LEDGER_PATH = Path("~/.claude/router-field-records.jsonl").expanduser()
@@ -149,3 +155,157 @@ def query_records(
             records.append(record)
 
     return QueryResult(records=records, skipped_count=skipped_count)
+
+
+# --- Replay-bundle capture protocol (U2) ------------------------------------
+#
+# The §6 outcome line gains an OPTIONAL, labelled trailing `base:<sha>` token.
+# It is located by its `base:` label, not by position, so a reader that indexes
+# the first seven `·`-delimited fields keeps working unchanged.
+
+OUTCOME_DELIM = " · "
+_BASE_TOKEN = re.compile(r"^base:(?P<sha>\S+)$")
+
+
+class ParsedOutcome(NamedTuple):
+    """A §6 outcome line split into the fields the flywheel joins on."""
+
+    unit_ref: str | None
+    executor: str | None
+    status: str | None
+    date: str | None
+    base_commit: str | None
+    fields: list[str]
+
+
+def parse_outcome_line(line: str) -> ParsedOutcome:
+    """Parse a §6 outcome line, tolerating a trailing ``base:<sha>`` token.
+
+    Lines written before U2 (seven fields, no base token) parse cleanly with
+    ``base_commit is None``; lines carrying the token expose it regardless of
+    where it sits among the trailing fields.
+    """
+    stripped = line.strip().lstrip("-").strip()
+    fields = [f.strip() for f in stripped.split(OUTCOME_DELIM) if f.strip()]
+
+    base_commit = None
+    positional = []
+    for field in fields:
+        match = _BASE_TOKEN.match(field)
+        if match:
+            base_commit = match.group("sha")
+        else:
+            positional.append(field)
+
+    def at(index: int) -> str | None:
+        return positional[index] if index < len(positional) else None
+
+    return ParsedOutcome(
+        unit_ref=at(0),
+        executor=at(1),
+        status=at(2),
+        date=at(6),
+        base_commit=base_commit,
+        fields=fields,
+    )
+
+
+# Structural secret patterns mirroring scripts/leak-check.sh's structural
+# checks. leak-check.sh also enforces a gitignored term blocklist against
+# tracked files; that repo-file scan stays the U11 push-time gate. Bundle
+# content is in-hand text, so only the structural patterns apply here.
+_SECRET_PATTERNS = (
+    ("absolute home path", re.compile(r"/Users/[a-z]|/home/[a-z]")),
+    (
+        "credential-shaped URL",
+        re.compile(r"[a-z]+://[^ /:]+:[^ /@]+@[a-zA-Z0-9.-]+"),
+    ),
+    (
+        "UUID-shaped id",
+        re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        ),
+    ),
+)
+
+
+def scan_bundle_content(texts: Iterable[str]) -> list[str]:
+    """Return one hit string per structural-secret match across ``texts``."""
+    hits = []
+    for text in texts:
+        if text is None:
+            continue
+        for label, pattern in _SECRET_PATTERNS:
+            if pattern.search(text):
+                hits.append(f"{label}: matched in bundle content")
+    return hits
+
+
+class BundleResult(NamedTuple):
+    """Outcome of a bundle write."""
+
+    written: bool
+    path: Path | None
+    margin_limited: bool
+    refused_reason: str | None
+
+
+def write_bundle(
+    root: str | Path,
+    unit_ref: str,
+    *,
+    base_commit: str,
+    spec: str,
+    verify_commands: Sequence[str],
+    first_shot_patch: str | None = None,
+) -> BundleResult:
+    """Write a replay bundle for ``unit_ref`` under ``root``.
+
+    Layout::
+
+        <root>/<unit_ref>/meta.json          base_commit, verify_commands, margin_limited
+        <root>/<unit_ref>/spec.md            frozen spec
+        <root>/<unit_ref>/first_shot.patch   incumbent's first diff (when present)
+
+    A missing first-shot artifact does NOT reject the bundle: it is marked
+    ``margin_limited`` (U4 degrades to verify-only grading). A structural-secret
+    hit in any bundle content REFUSES the write and reports the reason; nothing
+    is written.
+    """
+    hits = scan_bundle_content(
+        [spec, first_shot_patch, *verify_commands]
+    )
+    if hits:
+        return BundleResult(
+            written=False,
+            path=None,
+            margin_limited=False,
+            refused_reason="; ".join(hits),
+        )
+
+    margin_limited = first_shot_patch is None
+    bundle_dir = Path(root).expanduser() / unit_ref
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        "unit_ref": unit_ref,
+        "base_commit": base_commit,
+        "verify_commands": list(verify_commands),
+        "margin_limited": margin_limited,
+    }
+    (bundle_dir / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (bundle_dir / "spec.md").write_text(spec, encoding="utf-8")
+    if first_shot_patch is not None:
+        (bundle_dir / "first_shot.patch").write_text(
+            first_shot_patch, encoding="utf-8"
+        )
+
+    return BundleResult(
+        written=True,
+        path=bundle_dir,
+        margin_limited=margin_limited,
+        refused_reason=None,
+    )

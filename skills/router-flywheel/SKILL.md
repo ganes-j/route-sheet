@@ -22,7 +22,7 @@ Turn real router outcomes into a better policy. `route-plan` decides and `codex-
    - Manifests: `~/.claude/plans/*-routing.md` and, when a repo is in play, `<repo>/docs/plans/*-routing.md`.
    - For each manifest, read BOTH `## Assignments` (U-ID → executor + shape hint from the reason) and `## Execution log` (U-ID → outcome line). **Join on U-ID** to map each outcome to a policy cell `(task-shape → executor)`. If the shape isn't explicit in the assignment reason, infer it from the unit; if you can't, skip that line and note it.
    - Also read `ROUTING_POLICY.md` §5 drift log.
-   - Parse every execution-log line per the §6 grammar (7 `·`-delimited fields).
+   - Parse every execution-log line per the §6 grammar (7 `·`-delimited fields, plus an OPTIONAL trailing `base:<sha>` token). Locate `base:` by its label, not by field position — a line may or may not carry it, and indexing the first seven fields must stay correct either way. `bin/field_records.py:parse_outcome_line()` implements exactly this tolerance if you parse in code rather than by grep.
 
 4. **Cold-start / no-new-data guard.** No manifests, OR no execution-log lines, OR every line predates the last-verified date of the cell it maps to (nothing new since the cell was last touched) → report "nothing to propose," exit clean. This is the normal state until real routed features accumulate — it is a no-op, not an error. **Never write to the policy on this path.**
 

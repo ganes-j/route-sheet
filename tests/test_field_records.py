@@ -141,5 +141,103 @@ class FieldRecordTests(unittest.TestCase):
             )
 
 
+class ReplayBundleTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name) / "bundles"
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def test_bundle_writer_produces_documented_layout(self):
+        result = field_records.write_bundle(
+            self.root,
+            "U4",
+            base_commit="abc123",
+            spec="Implement the runner.",
+            verify_commands=["python3 -m unittest tests/test_bakeoff_grading.py"],
+            first_shot_patch="diff --git a/x b/x\n",
+        )
+
+        self.assertTrue(result.written)
+        self.assertFalse(result.margin_limited)
+        self.assertIsNone(result.refused_reason)
+        bundle = self.root / "U4"
+        self.assertEqual(result.path, bundle)
+        meta = json.loads((bundle / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["base_commit"], "abc123")
+        self.assertEqual(
+            meta["verify_commands"],
+            ["python3 -m unittest tests/test_bakeoff_grading.py"],
+        )
+        self.assertFalse(meta["margin_limited"])
+        self.assertEqual(
+            (bundle / "spec.md").read_text(encoding="utf-8"),
+            "Implement the runner.",
+        )
+        self.assertEqual(
+            (bundle / "first_shot.patch").read_text(encoding="utf-8"),
+            "diff --git a/x b/x\n",
+        )
+
+    def test_missing_first_shot_artifact_marks_margin_limited_not_rejected(self):
+        result = field_records.write_bundle(
+            self.root,
+            "U7",
+            base_commit="def456",
+            spec="Trial unit, no incumbent diff.",
+            verify_commands=["python3 -m unittest tests/test_route_pick.py"],
+            first_shot_patch=None,
+        )
+
+        self.assertTrue(result.written)
+        self.assertTrue(result.margin_limited)
+        bundle = self.root / "U7"
+        self.assertFalse((bundle / "first_shot.patch").exists())
+        meta = json.loads((bundle / "meta.json").read_text(encoding="utf-8"))
+        self.assertTrue(meta["margin_limited"])
+
+    def test_secret_pattern_hit_refuses_bundle_write(self):
+        result = field_records.write_bundle(
+            self.root,
+            "U9",
+            base_commit="ghi789",
+            spec="see postgres://admin:hunter2@db.prod.example.com:5432/main",
+            verify_commands=["pytest"],
+            first_shot_patch=None,
+        )
+
+        self.assertFalse(result.written)
+        self.assertIsNotNone(result.refused_reason)
+        self.assertIn("credential-shaped URL", result.refused_reason)
+        self.assertFalse((self.root / "U9").exists())
+
+
+class OutcomeLineParserTests(unittest.TestCase):
+    def test_parses_line_without_base_token(self):
+        line = (
+            "U2 · codex-implementer · PASS · re-check `pnpm test parser` green · "
+            "0 fix rounds · 01JABCsession · 2026-07-20"
+        )
+        parsed = field_records.parse_outcome_line(line)
+
+        self.assertEqual(parsed.unit_ref, "U2")
+        self.assertEqual(parsed.executor, "codex-implementer")
+        self.assertEqual(parsed.status, "PASS")
+        self.assertEqual(parsed.date, "2026-07-20")
+        self.assertIsNone(parsed.base_commit)
+
+    def test_parses_line_with_trailing_base_token(self):
+        line = (
+            "- U2 · codex-implementer · PASS · re-check `pnpm test parser` green · "
+            "0 fix rounds · 01JABCsession · 2026-07-20 · base:ba3f924"
+        )
+        parsed = field_records.parse_outcome_line(line)
+
+        self.assertEqual(parsed.unit_ref, "U2")
+        self.assertEqual(parsed.date, "2026-07-20")
+        self.assertEqual(parsed.base_commit, "ba3f924")
+
+
 if __name__ == "__main__":
     unittest.main()
