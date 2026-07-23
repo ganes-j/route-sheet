@@ -371,12 +371,17 @@ def cmd_sweep(args):
     log = _log(args.runner_log)
     candidates = None
     records_written = 0
+    replay_marker_failed = False
     for unit in replayable:
         bundle_dir = (
             DEFAULT_BUNDLE_ROOT
             / unit["bundle_namespace"]
             / unit["unit_ref"]
         )
+        replayed_path = bundle_dir / ".replayed"
+        if replayed_path.exists():
+            print(f"SKIP {unit['unit_ref']}: already replayed")
+            continue
         meta_path = bundle_dir / "meta.json"
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -426,12 +431,22 @@ def cmd_sweep(args):
         except OSError as exc:
             print(f"SKIP {unit['unit_ref']}: replay failed: {exc}")
             continue
-        records_written += len(outcome.records_written)
+        record_count = len(outcome.records_written)
+        records_written += record_count
+        if record_count:
+            try:
+                replayed_path.touch()
+            except OSError as exc:
+                replay_marker_failed = True
+                print(
+                    f"SKIP {unit['unit_ref']}: "
+                    f"could not mark replayed: {exc}"
+                )
         if outcome.skipped_reason:
             print(f"SKIP {unit['unit_ref']}: {outcome.skipped_reason}")
 
     print(f"wrote {records_written} field record(s)")
-    return 0
+    return 2 if replay_marker_failed else 0
 
 
 def cmd_run(args):
