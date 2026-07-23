@@ -63,6 +63,7 @@ This is a young system, published for the pattern more than the code. Concretely
 - There has been **one real production dispatch** through the full credential-scrub path: three frozen-spec units on a side project, 3/3 passed the re-check with zero fix rounds. That's evidence the machinery works end to end. It is not a track record.
 - The learning flywheel is built and fixture-tested but **runs dry-run until the R0 gate passes** — three consecutive real plans where routing fired unprompted. It refuses to learn from data it doesn't have. I consider this a feature, and it's honest to say the gate hasn't passed yet.
 - The read-only scout lanes (codex-scout, haiku-scout) have rows in the policy but drew zero demand in the seeding baseline; the dedicated scout wrapper is deferred.
+- The **bake-off knowledge base** (field-record ledger, replay runner, blinded judge, challenger seeding, flywheel ledger-read) is built and tested, but **ships with the ledger empty and the R19 decision thresholds marked provisional** (5 records/pair, ±10% margin band, 90-day staleness — revisited at the first flywheel evaluation). It measures the local fleet against incumbents so cells can flip on evidence instead of opinion; that evidence doesn't exist yet. The impl-unit agentic-replay path is gated behind a harness feasibility spike that hasn't run.
 
 If you want a battle-tested product, this isn't one. If you want a worked, runnable answer to "how should delegation across vendors be governed on a personal stack," that's what's here.
 
@@ -96,6 +97,8 @@ docs/          architecture · routing-policy-spec · security-model · outcome-
 templates/     ROUTING_POLICY · LOCAL_MODELS · claude-md-router-section · ROUTER_STATUS · example manifest
 skills/        route-plan · codex-dispatch · router-flywheel   (Claude Code SKILL.md files)
 bin/llocal     stdlib-only Ollama CLI (models / run / batch)
+bin/           route_pick · openrouter_discovery · model_staleness · field_records (ledger) ·
+               bakeoff_eligibility · bakeoff_grading · bakeoff (runner) · challenger_seeding
 hooks/         SessionStart kill-switch context injector
 fixtures/      sample plan + expected manifest (SETUP.md's smoke test)
 scripts/       leak-check.sh — pre-publish sanitization gate (blocklist stays local, gitignored)

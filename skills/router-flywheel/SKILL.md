@@ -22,13 +22,18 @@ Turn real router outcomes into a better policy. `route-plan` decides and `codex-
    - Manifests: `~/.claude/plans/*-routing.md` and, when a repo is in play, `<repo>/docs/plans/*-routing.md`.
    - For each manifest, read BOTH `## Assignments` (U-ID → executor + shape hint from the reason) and `## Execution log` (U-ID → outcome line). **Join on U-ID** to map each outcome to a policy cell `(task-shape → executor)`. If the shape isn't explicit in the assignment reason, infer it from the unit; if you can't, skip that line and note it.
    - Also read `ROUTING_POLICY.md` §5 drift log.
-   - Parse every execution-log line per the §6 grammar (7 `·`-delimited fields).
+   - Parse every execution-log line per the §6 grammar (7 `·`-delimited fields, plus an OPTIONAL trailing `base:<sha>` token). Locate `base:` by its label, not by field position — a line may or may not carry it, and indexing the first seven fields must stay correct either way. `bin/field_records.py:parse_outcome_line()` implements exactly this tolerance if you parse in code rather than by grep.
+   - **Read the field-record ledger** (`~/.claude/router-field-records.jsonl`, per §3) via `bin/field_records.py:query_records()`. Each record carries `shape`, `executor`, `kind` (`replay`/`real`/`reverse-replay`), `verify_pass`, optional `margin`, and `unit_ref`. Join records to cells by `(shape → executor)` the same way as outcome lines. **Deduplicate on `unit_ref`:** a routed unit's §6 manifest line and its `real` ledger record are the SAME event — count it once toward flip thresholds, never twice.
 
 4. **Cold-start / no-new-data guard.** No manifests, OR no execution-log lines, OR every line predates the last-verified date of the cell it maps to (nothing new since the cell was last touched) → report "nothing to propose," exit clean. This is the normal state until real routed features accumulate — it is a no-op, not an error. **Never write to the policy on this path.**
 
 5. **Tally + evaluate per cell.** For each `(shape → executor)` cell with new lines:
    - Count **clean** (`PASS`, re-check green, ≤1 fix round), **fail** (`FAIL`), **fallback** (`FALLBACK`).
-   - Apply §3 thresholds:
+   - **Evidence class governs what a record can propose (§3 R19):**
+     - **`real` / `fallback`** records + `real`-equivalent outcome lines → **flip-eligible** (count toward `❓→✅` / `✅→❌`).
+     - **`replay`** records (bake-off evidence) → **eligibility only**: they can support a **challenger-seed proposal** (surface a `❓` seed per §3 seeding) but NEVER flip a cell. Replay margins are directional evidence, not a routed outcome.
+     - **Below the R19 decision threshold** (§3: fewer than the minimum records per shape/candidate pair) → **propose nothing** for that cell — not silence-with-a-note, no proposal at all until the floor is met.
+   - Apply §3 thresholds (to flip-eligible evidence only):
      - **`❓ → ✅`** — 2+ clean outcomes.
      - **`✅ → ❌`** — a *pattern*: 2–3 consecutive fails or a stated structural cause. Never on a single bad run (one fail is often a bad spec).
      - Otherwise → the cell's counts move but its **state** holds.

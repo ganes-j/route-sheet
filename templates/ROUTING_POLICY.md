@@ -91,6 +91,36 @@ These four rules make selection on a candidate-list row **deterministic** — th
 
 **Shipping router changes (fast-track).** Policy edits, catalog mirrors, proving-outcome logs, and cell flips ship as PRs to the ruleset-protected `main` (audit trail) on a **fast track — no required review, no wait for a separate merge request**: the coordinator opens the PR and self-merges (squash) immediately. The `main` ruleset enforces the flow (require-PR + no force-push/deletion) without gating on review or thread-resolution; advisory bot review may comment but never blocks. The one carve-out: a **cell state-change** (`❓→✅` / `✅→❌`) still gets the maintainer's §3 decision sign-off — surfaced for a yes — after which its flip PR fast-tracks like the rest.
 
+### Challenger seeding — reopening a cell when the candidate set changes
+
+`✅` means "incumbent proven," never "competition over." When the candidate set changes, `bin/challenger_seeding.py` **proposes** `❓` seeds into matching §2 rows — it is **emit-only** (mirrors `bin/openrouter_discovery.py`): it prints pasteable proposal lines the maintainer approves, and **never writes the policy file**. An approved seed becomes a `❓` candidate in the row and flows through `route_pick`'s existing trial path (§3 R5–R6, bake-off window) — no new cell state, no new routing branch.
+
+Four triggers each propose one `❓` seed:
+
+- **New catalog model** whose task-fit tag matches an existing shape row.
+- **Plausible-untested candidate** — a catalog model whose task-fit tags intersect a row but which is absent from that row's candidate list.
+- **Materially-changed `❌`** — a candidate currently `❌` whose catalog entry shows a new version → a re-try seed.
+- **Stale `✅`** — a `✅` cell whose most recent evidence (cell `last` date, or a ledger record date when available) is older than the staleness age (**90 days, provisional — KTD7**).
+
+"Plausibly serve" v1 = the catalog's per-model task-fit tags (the "Best for" data) intersected with the shape row; the mapping is kept **narrow** — no proposal beats flooding. Dedup is by canonical key (the OpenRouter naming-reconciliation lesson): a model already holding any state in a row gets no duplicate proposal, and a new model with no matching shape gets none. Seeds are sign-off-gated exactly like a flip — the flywheel (§4, R0-gated) may also surface them, but the maintainer disposes.
+
+### Field-record evidence classes & the R19 decision threshold
+
+The field-record ledger (`~/.claude/router-field-records.jsonl`, configurable — machine-owned per KTD1, never these cells) is the flywheel's second read surface. What a record can *propose* depends on its `kind`:
+
+- **`real` / `fallback`** — a genuinely routed unit's outcome. **Flip-eligible**: counts toward `❓→✅` / `✅→❌` above. A routed unit's §6 manifest outcome line and its `real` ledger record are the **same event** — the flywheel dedups on `unit_ref` and counts it once.
+- **`replay`** — a bake-off replay (a challenger re-running a completed unit; §2 runner). **Eligibility only**: replay margins support a challenger-**seed** proposal, never a cell flip. Replay is directional evidence that a candidate *might* serve; flips still require real routed outcomes plus sign-off.
+- **`reverse-replay`** — an incumbent replayed for a margin (KTD4, spend-gated). Same eligibility-only class as `replay`.
+
+**R19 decision thresholds — provisional (KTD7), revisited at the first flywheel evaluation.** No proposal fires for a cell below the record floor:
+
+- **Minimum 5 records** per shape/candidate pair before any proposal.
+- **Margin band ±10%** counts as "similar" (neither candidate meaningfully ahead).
+- **Sampling: 100%** of eligible units (volume is scarce — sample everything).
+- **Staleness age: 90 days** (also drives §3 stale-`✅` seeding above).
+
+The floor is a real gate, not advice: below 5 records the flywheel proposes nothing for that pair. The threshold review fires at **5 records per pair or 6 weeks after the first ledger write, whichever comes first**, so the loop cannot stall silently under the floor. The R0 gate and sign-off flow are unchanged — R19 governs *how much evidence*, R0 governs *whether the automated proposer runs at all*.
+
 ---
 
 ## 4. Evidence rules
@@ -117,7 +147,7 @@ Every routed unit emits **one** outcome line when it completes. Writers (codex-d
 **Grammar** (single line, `·`-delimited — greppable, no parser needed):
 
 ```
-U<N> · <executor> · <PASS|FAIL|FALLBACK> · re-check <cmd|n/a> <green|red|n/a> · <N> fix rounds · <ref|na> · <YYYY-MM-DD>
+U<N> · <executor> · <PASS|FAIL|FALLBACK> · re-check <cmd|n/a> <green|red|n/a> · <N> fix rounds · <ref|na> · <YYYY-MM-DD> [· base:<sha>]
 ```
 
 - **`U<N>`** — the plan U-ID. For ad-hoc work with no plan, use a short slug (e.g. `adhoc:catalog-extract`).
@@ -127,6 +157,7 @@ U<N> · <executor> · <PASS|FAIL|FALLBACK> · re-check <cmd|n/a> <green|red|n/a>
 - **`<N> fix rounds`** — coordinator fix rounds after the worker's output before it passed (`0` = clean first try). A "clean" outcome for flip-counting (§3) = `PASS` with ≤1 fix round.
 - **`<ref>`** — Codex session-id, llocal batch id, or `na`.
 - **date** — `YYYY-MM-DD` the line was written (the reader treats a line as "new" if dated after the target cell's last-verified date).
+- **`base:<sha>`** *(optional, trailing)* — the pre-unit base commit, the repo state the executor started from. Written by every §6 writer when a replay bundle was captured (see **Replay-bundle capture** below); it is what lets the bake-off runner replay the unit faithfully. **Located by its `base:` label, never by position** — a reader that indexes the first seven fields is unaffected, and lines predating this token (no `base:`) stay valid. Absent → the unit is unreplayable (pre-capture history); the historical sweep skips it.
 
 **Required-field rules by executor class:**
 - **Write-workers** (`codex-implementer`, llocal batch, coordinator writes): `re-check` must carry a real command + result; `<N> fix rounds` required.
@@ -138,7 +169,22 @@ U2 · codex-implementer · PASS · re-check `pnpm test parser` green · 0 fix ro
 U5 · llocal:qwen3.5 · PASS · re-check spot-checked 12/12 items green · 1 fix rounds · batch-7f3 · 2026-07-21
 U3 · haiku-scout · PASS · re-check n/a n/a · 0 fix rounds · na · 2026-07-21
 U4 · codex-implementer · FALLBACK · re-check `pnpm build` red · 0 fix rounds · 01JXYZ…session · 2026-07-22
+U6 · codex-implementer · PASS · re-check `pnpm test seeding` green · 0 fix rounds · 01JABC…session · 2026-07-23 · base:ba3f924
 ```
+
+### Replay-bundle capture (feeds the bake-off runner)
+
+When a routed unit completes, the same wrap-up step that writes its outcome line MAY capture a **replay bundle** — the frozen inputs a challenger needs to re-run the unit later. Capture is what earns the trailing `base:<sha>` token; a unit with no bundle simply omits it.
+
+A bundle is a directory keyed by unit ref **under a per-plan namespace** (default root `~/.claude/router-replay-bundles/`, configurable) — `U1` is reused by nearly every plan, so `write_bundle` takes a `namespace` (a plan/repo-unique key) to keep captures from colliding; both components are validated as safe single path segments. It holds:
+
+- `meta.json` — the pre-unit `base_commit`, the unit's `verify_commands`, and a `margin_limited` flag;
+- `spec.md` — the frozen spec the unit was built from;
+- `first_shot.patch` — the incumbent's **first** diff, pre-fix-rounds, kept separate from its shipped result. Missing → the bundle is `margin_limited` (the runner degrades to verify-only grading), **not rejected**.
+
+`bin/field_records.py:write_bundle()` writes this layout. Before writing, it runs `scan_bundle_content()` — the **structural** patterns of `scripts/leak-check.sh` (absolute home paths, credential-shaped URLs, UUID-shaped ids) — over every bundle file; a hit **refuses** the write and logs the reason. (leak-check.sh's gitignored term-blocklist scan stays the U11 push-time gate over tracked files; bundle content is transient and only the structural patterns apply.)
+
+The outcome line and the bundle are written at the same moment, so `base:<sha>` in the line and the bundle dir stay consistent. `parse_outcome_line()` in the same module recovers the base commit label-first for readers that want it.
 
 ---
 

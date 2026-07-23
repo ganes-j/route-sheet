@@ -113,7 +113,9 @@ def _parse_candidates(cell):
         name = token[:pos].replace("★", "").strip()
         if not name:
             continue
-        candidates.append({"name": name, "state": state, "index": idx})
+        evidence = re.search(r"\(\s*n=(\d+)\b", token[pos + len(state):])
+        candidates.append({"name": name, "state": state, "index": idx,
+                           "n": int(evidence.group(1)) if evidence else 0})
     return candidates
 
 
@@ -164,7 +166,7 @@ def pick(shape, verifiable, low_stakes, constraint_clean, matrix_text):
         challengers = [c for c in candidates
                        if c is not star and c["state"] == "❓"]
         if challengers and low_stakes:
-            chosen = challengers[0]  # first-listed ❓ challenger (deterministic)
+            chosen = min(challengers, key=lambda c: (c["n"], c["index"]))
             return (chosen["name"], True)
 
         return (star["name"], star["state"] == "❓")

@@ -14,7 +14,7 @@ Mode: gated · Coordinator: frontier session model
 (one outcome line per routed unit, per ROUTING_POLICY.md §6)
 
 U1 · coordinator · PASS · re-check n/a n/a · 0 fix rounds · na · 2026-03-02
-U2 · codex-implementer · PASS · re-check `pnpm test export-service` green · 0 fix rounds · 01JEXAMPLESESSION1 · 2026-03-02
+U2 · codex-implementer · PASS · re-check `pnpm test export-service` green · 0 fix rounds · 01JEXAMPLESESSION1 · 2026-03-02 · base:9ac2272
 U3 · llocal:qwen3.5 · PASS · re-check spot-checked 20/20 items green · 1 fix rounds · batch-3a9 · 2026-03-02
 U4 · codex-implementer · FALLBACK · re-check `pnpm test export-cron` red · 0 fix rounds · 01JEXAMPLESESSION2 · 2026-03-03
 U5 · coordinator · PASS · re-check full suite green, preview loads · 0 fix rounds · na · 2026-03-03
