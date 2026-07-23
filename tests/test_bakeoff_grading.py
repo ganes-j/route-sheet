@@ -505,10 +505,13 @@ class SweepDriverTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertFalse(replayed)
         self.assertIn(
-            "SKIP U6: could not mark replayed: read-only bundle",
+            "SKIP U6: could not claim replay marker: read-only bundle",
             output.getvalue(),
         )
-        self.assertIn("wrote 1 field record(s)", output.getvalue())
+        # Claim fails BEFORE replay, so NO record is written — this is the fix:
+        # a marker failure can no longer leave a recorded bundle that re-runs
+        # and duplicates on the next sweep.
+        self.assertIn("wrote 0 field record(s)", output.getvalue())
 
     def test_sweep_with_pending_and_replayed_bundles_runs_only_pending(self):
         with tempfile.TemporaryDirectory() as d:

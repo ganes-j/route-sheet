@@ -45,21 +45,36 @@ class SweepHookTests(unittest.TestCase):
 
     def test_kill_switch_absent_fires_detached_sweep(self):
         off = Path(self.tmp.name) / ".router-off"  # not created
+        plans = Path(self.tmp.name) / "plans"
+        plans.mkdir()
+        (plans / "demo-plan-routing.md").write_text("## Assignments\n", encoding="utf-8")
+        glob = str(plans / "*-routing.md")
 
         fired = hook.sweep_fire(
             self.bakeoff,
-            ["docs/plans/*-routing.md"],
+            [glob],
             router_off_path=str(off),
             popen=FakePopen,
         )
 
-        self.assertEqual(fired, ["docs/plans/*-routing.md"])
+        self.assertEqual(fired, [glob])
         self.assertEqual(len(FakePopen.calls), 1)
         argv, kwargs = FakePopen.calls[0]
         self.assertIn("--sweep", argv)
         self.assertIn(str(self.bakeoff), argv)
         # non-blocking + detached contract: new session, no wait primitive used
         self.assertTrue(kwargs.get("start_new_session"))
+
+    def test_glob_with_no_matching_manifest_fires_nothing(self):
+        off = Path(self.tmp.name) / ".router-off"  # not created
+        fired = hook.sweep_fire(
+            self.bakeoff,
+            [str(Path(self.tmp.name) / "plans" / "*-routing.md")],  # dir does not exist
+            router_off_path=str(off),
+            popen=FakePopen,
+        )
+        self.assertEqual(fired, [])
+        self.assertEqual(FakePopen.calls, [])
 
     def test_missing_runner_is_a_noop(self):
         off = Path(self.tmp.name) / ".router-off"

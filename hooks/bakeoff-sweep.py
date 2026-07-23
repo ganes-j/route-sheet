@@ -12,6 +12,7 @@ plugin (`hooks/` beside `bin/bakeoff`) or the live twin (`~/.claude/` beside
 `bakeoff`).
 """
 
+import glob as _glob
 import os
 import subprocess
 import sys
@@ -60,15 +61,19 @@ def sweep_fire(
         return []
 
     fired = []
-    for glob in globs:
-        expanded = os.path.expanduser(glob)
+    for pattern in globs:
+        expanded = os.path.expanduser(pattern)
+        # Don't spawn a detached process for a glob that matches no manifests —
+        # the sweep would only print "no manifests matched" and exit.
+        if not _glob.glob(expanded, recursive=True):
+            continue
         popen(
             [sys.executable, str(bakeoff_path), "--sweep", expanded],
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        fired.append(glob)
+        fired.append(pattern)
     return fired
 
 

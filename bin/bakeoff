@@ -414,6 +414,21 @@ def cmd_sweep(args):
         if candidates is None:
             candidates = _candidate_executors(args.challengers)
         challengers = grading.select_challengers(unit, candidates)
+        # Atomic claim BEFORE replaying: an O_EXCL create (touch exist_ok=False)
+        # stops a concurrent session-end sweep from replaying the same bundle
+        # (duplicate records), and marking before the ledger write means a later
+        # marker failure can't leave an already-recorded bundle unmarked. The
+        # claim is released below if the replay lands no record (infra failure /
+        # no eligible challenger), so those retry on the next sweep.
+        try:
+            replayed_path.touch(exist_ok=False)
+        except FileExistsError:
+            print(f"SKIP {unit['unit_ref']}: already claimed by a concurrent sweep")
+            continue
+        except OSError as exc:
+            replay_marker_failed = True
+            print(f"SKIP {unit['unit_ref']}: could not claim replay marker: {exc}")
+            continue
         try:
             outcome = grading.grade_replay(
                 unit, meta, challengers,
@@ -429,19 +444,15 @@ def cmd_sweep(args):
                 log_fn=log,
             )
         except OSError as exc:
+            replayed_path.unlink(missing_ok=True)  # release claim; replay didn't complete
             print(f"SKIP {unit['unit_ref']}: replay failed: {exc}")
             continue
         record_count = len(outcome.records_written)
         records_written += record_count
-        if record_count:
-            try:
-                replayed_path.touch()
-            except OSError as exc:
-                replay_marker_failed = True
-                print(
-                    f"SKIP {unit['unit_ref']}: "
-                    f"could not mark replayed: {exc}"
-                )
+        if record_count == 0:
+            # Nothing recorded (infra failure / no eligible challengers) —
+            # release the claim so the next sweep retries this bundle.
+            replayed_path.unlink(missing_ok=True)
         if outcome.skipped_reason:
             print(f"SKIP {unit['unit_ref']}: {outcome.skipped_reason}")
 
