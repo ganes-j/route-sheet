@@ -73,6 +73,65 @@ class RoutePickTests(unittest.TestCase):
         self.assertEqual(ex, "qwen3.5")
         self.assertFalse(trial)
 
+    # U7: when several seeded challengers are eligible, spread trials to the
+    # challenger with the least evidence instead of pinning to document order.
+    def test_r6_multiple_challengers_selects_lowest_evidence_count(self):
+        m = matrix([
+            ("batch-extraction (text/JSON)",
+             "qwen3.5 ★✅ (n=4: 4 clean, last 2026-07-20) · "
+             "gpt-oss:20b ❓ (n=3: 3 clean, last 2026-07-21) · "
+             "gpt-oss:120b ❓ (n=1: 1 clean, last 2026-07-22)",
+             "llocal models"),
+        ])
+        ex, trial = route_pick.pick(
+            "batch-extraction (text/JSON)", verifiable=True, low_stakes=True,
+            constraint_clean=True, matrix_text=m)
+        self.assertEqual(ex, "gpt-oss:120b")
+        self.assertTrue(trial)
+
+    def test_r6_multiple_challengers_tie_breaks_by_document_order(self):
+        m = matrix([
+            ("batch-extraction (text/JSON)",
+             "qwen3.5 ★✅ (n=4: 4 clean, last 2026-07-20) · "
+             "gpt-oss:20b ❓ (n=1: 1 clean, last 2026-07-21) · "
+             "gpt-oss:120b ❓ (n=1: 1 clean, last 2026-07-22)",
+             "llocal models"),
+        ])
+        ex, trial = route_pick.pick(
+            "batch-extraction (text/JSON)", verifiable=True, low_stakes=True,
+            constraint_clean=True, matrix_text=m)
+        self.assertEqual(ex, "gpt-oss:20b")
+        self.assertTrue(trial)
+
+    def test_r6_seed_yields_after_its_evidence_count_increases(self):
+        fresh_seed = matrix([
+            ("batch-extraction (text/JSON)",
+             "qwen3.5 ★✅ (n=4: 4 clean, last 2026-07-20) · "
+             "gpt-oss:20b ❓ · "
+             "gpt-oss:120b ❓ (n=1: 1 clean, last 2026-07-22)",
+             "llocal models"),
+        ])
+        recorded_seed = matrix([
+            ("batch-extraction (text/JSON)",
+             "qwen3.5 ★✅ (n=4: 4 clean, last 2026-07-20) · "
+             "gpt-oss:20b ❓ (n=2: 2 clean, last 2026-07-23) · "
+             "gpt-oss:120b ❓ (n=1: 1 clean, last 2026-07-22)",
+             "llocal models"),
+        ])
+
+        self.assertEqual(
+            route_pick.pick(
+                "batch-extraction (text/JSON)", verifiable=True,
+                low_stakes=True, constraint_clean=True,
+                matrix_text=fresh_seed),
+            ("gpt-oss:20b", True))
+        self.assertEqual(
+            route_pick.pick(
+                "batch-extraction (text/JSON)", verifiable=True,
+                low_stakes=True, constraint_clean=True,
+                matrix_text=recorded_seed),
+            ("gpt-oss:120b", True))
+
     # 4. R4 verify-gate — no load-bearing verify command: never a write-worker
     #    or challenger; falls to coordinator, never a trial.
     def test_r4_verify_gate_never_write_worker_or_challenger(self):
