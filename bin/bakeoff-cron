@@ -52,15 +52,19 @@ def claude_session_active(pgrep_fn=None):
     (regardless of the PID source) so the cron never reads itself as a session.
     """
     def _default_pgrep():
-        try:
-            out = subprocess.run(
-                ["pgrep", "-f", CLAUDE_PROC_PATTERN],
-                capture_output=True, text=True, timeout=10,
-            )
-            return [p for p in out.stdout.split() if p.strip()]
-        except (subprocess.SubprocessError, OSError):
-            return []  # can't tell → assume none, let the sweep run
-    pids = [p for p in (pgrep_fn or _default_pgrep)() if p != str(os.getpid())]
+        out = subprocess.run(
+            ["pgrep", "-f", CLAUDE_PROC_PATTERN],
+            capture_output=True, text=True, timeout=10,
+        )
+        return [p for p in out.stdout.split() if p.strip()]
+    try:
+        raw = (pgrep_fn or _default_pgrep)()
+    except (subprocess.SubprocessError, OSError):
+        # Fail CLOSED: if we can't determine whether a session is active, assume
+        # one is and defer the sweep. Never contend on an unknown — a missed
+        # sweep only delays evidence; a wrongly-run sweep hurts live work.
+        return True
+    pids = [p for p in raw if p != str(os.getpid())]
     return bool(pids)
 
 
@@ -81,6 +85,10 @@ def run_cron(
     if session_active_fn():
         _log(log_path, "deferred: an interactive Claude session is active")
         return "deferred-session"
+    # Accepted limitation: the idle check is point-in-time — a session that
+    # STARTS mid-sweep briefly shares the GPU. Tolerated: single-shot sweeps are
+    # short and concurrency-1, so the window is narrow; a mid-sweep abort/re-check
+    # is disproportionate complexity until impl-unit (long) replays land (U9).
 
     def _default_sweep():
         argv = [sys.executable, str(bakeoff_path), "--sweep",

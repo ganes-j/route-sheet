@@ -77,6 +77,21 @@ class BakeoffCronTests(unittest.TestCase):
         self.assertIn("prior line", contents)  # preserved
         self.assertIn("swept:", contents)       # appended
 
+    def test_pgrep_failure_fails_closed_and_defers(self):
+        # If process inspection fails, we must NOT assume "no session" and sweep —
+        # fail closed: treat as active, defer.
+        def boom():
+            raise OSError("pgrep unavailable")
+        self.assertTrue(cron.claude_session_active(pgrep_fn=boom))
+        sweep = FakeSweep()
+        outcome = cron.run_cron(
+            router_off_path=str(self.off), log_path=str(self.log),
+            session_active_fn=lambda: cron.claude_session_active(pgrep_fn=boom),
+            sweep_fn=sweep,
+        )
+        self.assertEqual(outcome, "deferred-session")
+        self.assertEqual(sweep.called, 0)
+
     def test_own_pid_not_counted_as_active_session(self):
         # A pgrep that returns only our own PID must not read as an active session.
         import os

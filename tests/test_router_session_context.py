@@ -67,7 +67,7 @@ class RouterSessionContextTests(unittest.TestCase):
             context = self.run_hook(tempdir)
 
         self.assertIn("MODEL ROUTER: ACTIVE", context)
-        self.assertNotIn("BAKE-OFF:", context)
+        self.assertIn("BAKE-OFF: idle", context)
 
     def test_ledger_read_failure_preserves_marker(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -82,7 +82,7 @@ class RouterSessionContextTests(unittest.TestCase):
             marker = json.loads(state_path.read_text(encoding="utf-8"))
 
         self.assertIn("MODEL ROUTER: ACTIVE", context)
-        self.assertNotIn("BAKE-OFF:", context)
+        self.assertIn("BAKE-OFF: idle", context)
         self.assertEqual(marker, {"seen": 7})
 
     def test_ledger_count_advances_since_last_marker(self):
@@ -93,9 +93,9 @@ class RouterSessionContextTests(unittest.TestCase):
             first_context = self.run_hook(tempdir)
             second_context = self.run_hook(tempdir)
 
-        self.assertIn("3 replay(s) since last check", first_context)
+        self.assertIn("3 new record(s) since last check", first_context)
         self.assertIn("3 ledger record(s)", first_context)
-        self.assertIn("0 replay(s) since last check", second_context)
+        self.assertIn("0 new record(s) since last check", second_context)
         self.assertIn("3 ledger record(s)", second_context)
 
     def test_positive_numeric_margins_count_as_challenger_wins(self):
@@ -127,7 +127,7 @@ class RouterSessionContextTests(unittest.TestCase):
 
             context = self.run_hook(tempdir)
 
-        self.assertIn("2 replay(s) since last check", context)
+        self.assertIn("2 new record(s) since last check", context)
         self.assertIn("1 challenger win(s) pending", context)
         self.assertIn("2 ledger record(s)", context)
 

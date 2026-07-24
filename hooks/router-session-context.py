@@ -31,6 +31,7 @@ def bakeoff_digest_line(ledger_path=None, state_path=None):
 
     total = 0
     wins = 0
+    ledger_ok = True
     try:
         with open(ledger_path, "r", encoding="utf-8", errors="replace") as ledger:
             for line in ledger:
@@ -49,7 +50,12 @@ def bakeoff_digest_line(ledger_path=None, state_path=None):
                 ):
                     wins += 1
     except FileNotFoundError:
-        pass
+        pass  # legitimately empty — safe to advance the marker to 0
+    except OSError:
+        # Unreadable (permission/IO) → degrade to idle rather than SUPPRESS the
+        # digest, but don't trust the count or advance the marker (a transient
+        # read error must not reset "seen" and cause a spurious burst next time).
+        ledger_ok = False
 
     seen = 0
     try:
@@ -64,17 +70,25 @@ def bakeoff_digest_line(ledger_path=None, state_path=None):
     except (AttributeError, OSError, TypeError, ValueError):
         pass
 
-    state_dir = os.path.dirname(state_path)
-    if state_dir:
-        os.makedirs(state_dir, exist_ok=True)
-    with open(state_path, "w", encoding="utf-8") as state_file:
-        json.dump({"seen": total}, state_file)
-        state_file.write("\n")
+    # Advance the marker best-effort, and only when the ledger was actually read:
+    # a write failure must NOT lose the digest line (else a persistently
+    # unwritable state dir goes dark forever), and an unreadable ledger must NOT
+    # reset "seen". In both cases the marker holds; next session re-reports.
+    if ledger_ok:
+        try:
+            state_dir = os.path.dirname(state_path)
+            if state_dir:
+                os.makedirs(state_dir, exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as state_file:
+                json.dump({"seen": total}, state_file)
+                state_file.write("\n")
+        except OSError:
+            pass
 
     if total == 0:
         return "BAKE-OFF: idle — no field records yet"
     return (
-        "BAKE-OFF: %d replay(s) since last check · "
+        "BAKE-OFF: %d new record(s) since last check · "
         "%d challenger win(s) pending · %d ledger record(s)"
         % (max(0, total - seen), wins, total)
     )
