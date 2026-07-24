@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent — idle-gated bake-off replay sweep (route-sheet).
+
+  A replay sweep is global background work, so it runs on this session-independent
+  StartInterval, NOT a session hook. The wrapper (bakeoff-cron) is the safety gate:
+  it skips on the .router-off kill switch and defers while an interactive Claude
+  session is active, so heavy local-model replays never contend with live work.
+
+  INSTALL (paths are placeholders — launchd needs absolute paths, no ~ or env):
+    1. Replace __CRON_PATH__ with the absolute path to bakeoff-cron
+       (live twin: /Users/<you>/.claude/bakeoff-cron).
+    2. Replace __LOG_DIR__ with an absolute dir for launchd's own out/err
+       (e.g. /Users/<you>/.claude).
+    3. Copy to ~/Library/LaunchAgents/com.route-sheet.bakeoff-sweep.plist
+    4. launchctl load ~/Library/LaunchAgents/com.route-sheet.bakeoff-sweep.plist
+  UNINSTALL:
+    launchctl unload ~/Library/LaunchAgents/com.route-sheet.bakeoff-sweep.plist
+  DISABLE without uninstall: touch ~/.claude/.router-off (the wrapper no-ops).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.route-sheet.bakeoff-sweep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__CRON_PATH__</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/router-bakeoff-launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/router-bakeoff-launchd.err</string>
+</dict>
+</plist>

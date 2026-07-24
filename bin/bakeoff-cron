@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""bakeoff-cron — idle-gated launchd entry point for the replay sweep.
+
+A replay sweep is global background work, so it runs on a launchd StartInterval
+(session-independent), NOT a session hook. This wrapper is the safety gate around
+it: it runs `bakeoff --sweep` only when it's safe to spend the GPU —
+
+  1. the ~/.claude/.router-off kill switch is absent, AND
+  2. no interactive Claude session is active (heavy local-model replays must never
+     contend with live work).
+
+Every decision is appended to a persistent log (~/.claude/router-bakeoff.log) so the
+SessionStart digest and the user can see what happened. Best-effort: it never raises
+out to launchd.
+
+  bakeoff-cron [--glob PATTERN] [--log PATH] [--ledger PATH]
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+ROUTER_OFF = "~/.claude/.router-off"
+DEFAULT_GLOB = "~/.claude/plans/*-routing.md"
+DEFAULT_LOG = "~/.claude/router-bakeoff.log"
+BAKEOFF = Path(__file__).with_name("bakeoff")
+# The interactive Claude binary; the python cron wrapper never matches this, so
+# it does not see itself as an active session.
+CLAUDE_PROC_PATTERN = "native-binary/claude"
+
+
+def _log(log_path, msg):
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {msg}"
+    try:
+        p = Path(log_path).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+    return line
+
+
+def claude_session_active(pgrep_fn=None):
+    """True if an interactive Claude session is running (idle-gate signal).
+
+    ``pgrep_fn`` returns the raw matching PID list; our own PID is filtered here
+    (regardless of the PID source) so the cron never reads itself as a session.
+    """
+    def _default_pgrep():
+        out = subprocess.run(
+            ["pgrep", "-f", CLAUDE_PROC_PATTERN],
+            capture_output=True, text=True, timeout=10,
+        )
+        return [p for p in out.stdout.split() if p.strip()]
+    try:
+        raw = (pgrep_fn or _default_pgrep)()
+    except (subprocess.SubprocessError, OSError):
+        # Fail CLOSED: if we can't determine whether a session is active, assume
+        # one is and defer the sweep. Never contend on an unknown — a missed
+        # sweep only delays evidence; a wrongly-run sweep hurts live work.
+        return True
+    pids = [p for p in raw if p != str(os.getpid())]
+    return bool(pids)
+
+
+def run_cron(
+    *,
+    router_off_path=ROUTER_OFF,
+    log_path=DEFAULT_LOG,
+    glob=DEFAULT_GLOB,
+    ledger_path=None,
+    bakeoff_path=BAKEOFF,
+    session_active_fn=claude_session_active,
+    sweep_fn=None,
+):
+    """Gate, then (maybe) sweep. Returns the outcome tag; logs every branch."""
+    if os.path.exists(os.path.expanduser(router_off_path)):
+        _log(log_path, "skipped: kill switch (.router-off present)")
+        return "skipped-killswitch"
+    if session_active_fn():
+        _log(log_path, "deferred: an interactive Claude session is active")
+        return "deferred-session"
+    # Accepted limitation: the idle check is point-in-time — a session that
+    # STARTS mid-sweep briefly shares the GPU. Tolerated: single-shot sweeps are
+    # short and concurrency-1, so the window is narrow; a mid-sweep abort/re-check
+    # is disproportionate complexity until impl-unit (long) replays land (U9).
+
+    def _default_sweep():
+        argv = [sys.executable, str(bakeoff_path), "--sweep",
+                os.path.expanduser(glob), "--runner-log", os.path.expanduser(log_path)]
+        if ledger_path:
+            argv += ["--ledger", os.path.expanduser(ledger_path)]
+        return subprocess.run(argv, capture_output=True, text=True, timeout=1800)
+
+    try:
+        result = (sweep_fn or _default_sweep)()
+    except (subprocess.SubprocessError, OSError) as exc:
+        _log(log_path, f"sweep error: {exc}")
+        return "sweep-error"
+    rc = getattr(result, "returncode", 0)
+    _log(log_path, f"swept: bakeoff --sweep exit={rc}")
+    return "swept"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Idle-gated bake-off replay sweep.")
+    ap.add_argument("--glob", default=DEFAULT_GLOB)
+    ap.add_argument("--log", dest="log", default=DEFAULT_LOG)
+    ap.add_argument("--ledger", default=None)
+    args = ap.parse_args(argv)
+    try:
+        run_cron(log_path=args.log, glob=args.glob, ledger_path=args.ledger)
+    except Exception:  # noqa: BLE001 - launchd entry point never raises
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

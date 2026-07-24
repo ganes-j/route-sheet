@@ -149,6 +149,17 @@ Enhances the model-awareness refresh ([templates/MODEL_REFRESH.md](templates/MOD
 
 ---
 
+## Optional — automatic bake-off replays (Tier 3 + capture)
+
+Once bake-off bundles are being captured (single-shot units), an idle-gated launchd agent drains them on a schedule so evidence accumulates without you thinking about it. Independent of the tiers — skip it and run `bakeoff --sweep` by hand when you want.
+
+- **Install:** copy `templates/com.route-sheet.bakeoff-sweep.plist` to `~/Library/LaunchAgents/`, replace `__CRON_PATH__` with the absolute path to `bakeoff-cron` and `__LOG_DIR__` with an absolute log dir, then `launchctl load ~/Library/LaunchAgents/com.route-sheet.bakeoff-sweep.plist`. It fires hourly; `bakeoff-cron` skips on `.router-off` and defers while a Claude session is active (no GPU contention).
+- **Visibility:** a one-line digest appears at SessionStart (`router-session-context.py`), and every run is logged to `~/.claude/router-bakeoff.log`.
+- **Note:** this replaces the earlier `SessionEnd` sweep hook — if you wired one, remove the `bakeoff-sweep.py` `SessionEnd` entry from `settings.json`.
+- **Uninstall:** `launchctl unload ~/Library/LaunchAgents/com.route-sheet.bakeoff-sweep.plist`.
+
+---
+
 ## Uninstall / disable
 
 - **Soft-disable (reversible, instant):** `touch ~/.claude/.router-off`. Every skill declines; the hook announces DISABLED. Re-enable: `rm ~/.claude/.router-off`.
