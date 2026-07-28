@@ -43,7 +43,7 @@ Match a unit's shape to a row; apply the constraint layer first. Each row lists 
 | CI/dep/test-bulk | codex-implementer ★❓ | Test authoring / dep bumps / tooling scripts from clear spec. |
 | batch-extraction (text/JSON) | qwen3.5 ★❓ · gpt-oss:20b ❓ · gpt-oss:120b ❓hq | Candidates are llocal models (pick the concrete tag per `LOCAL_MODELS.md`). Bulk structured extraction. Verify every item (llocal drops on timeout). `hq` = the higher-quality lane. |
 | PII-batch classification | qwen3.5 ★❓ · gpt-oss:20b ❓ | llocal models. Constraint layer forces local. Keep a deterministic ground-truth path. |
-| vision / OCR batch | llava ★❓ | llocal vision model. Image → text. |
+| vision / OCR batch | qwen3-vl ★❓ · llava ❓ | llocal vision model. Image → text. `qwen3-vl` (current-gen VLM) preferred over the dated `llava` (kept as fallback); pick the concrete tag per `LOCAL_MODELS.md`. `❓` until a real routed vision unit produces an outcome. |
 | huge-context sweep | haiku-scout ★❓ | Read-only; `★` haiku-scout for cheap/fast. **Escalate to codex-scout** when one big working context or an independent model helps (a coordinator judgment, not a candidate cell — scout lanes aren't a bake-off matrix). **Zero demand on execution plans** (baseline) — value is in research/planning, ad-hoc. |
 | adversarial / second-opinion review | codex-scout ★❓ | Read-only, independent model. Note: reviewing Codex-*written* output is a never-delegate gate. |
 | large-context code read / "where is X" | haiku-scout ★❓ | Cheapest read tier. |
