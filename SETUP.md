@@ -38,7 +38,7 @@ Present the exact write list for the target tier and get a yes before any write.
 - Copy → `~/.claude/ROUTING_POLICY.md` (from `templates/ROUTING_POLICY.md`)
 - Copy → `~/.claude/ROUTER_STATUS.md` (from `templates/ROUTER_STATUS.md`, with today's date filled in)
 - Copy → `~/.claude/skills/route-plan/SKILL.md`, `~/.claude/skills/router-flywheel/SKILL.md`
-- Copy → `~/.claude/router-session-context.py` (from `hooks/`)
+- Copy → `~/.claude/router-session-context.py` (from `hooks/`, with the plugin opt-in gate stripped; see Phase 3)
 - Merge → one SessionStart hook entry into `~/.claude/settings.json`
 - Insert → the marker-bounded block from `templates/claude-md-router-section.md` into `~/.claude/CLAUDE.md`
 
@@ -60,6 +60,15 @@ if [ ! -f "$dst" ]; then cp "$src" "$dst" && echo "installed $dst"
 elif diff -q "$src" "$dst" >/dev/null; then echo "already installed (identical)"
 else echo "CONFLICT — showing diff, asking user"; diff "$dst" "$src"; fi
 ```
+
+**SessionStart hook file:** copy it with the plugin opt-in gate removed. The repo copy carries a `CLAUDE_PLUGIN_OPTION_ENABLE_SESSION_STATUS` gate so the *plugin* distribution stays dormant until a user enables the option. A manual install is wired through `settings.json` instead and is always-on, governed only by `.router-off`. Copy the file verbatim and the hook prints nothing in every session, and check 4a fails.
+
+```bash
+sed '/^# Plugin opt-in gate/,/^    sys\.exit(0)$/d' \
+  "$RS/hooks/router-session-context.py" > ~/.claude/router-session-context.py
+```
+
+Apply the same exists / identical / differs handling as the other copies. Plugin installs skip this step entirely: the plugin runs the file from its own directory and the gate is what the `enable_session_status` option toggles.
 
 **CLAUDE.md block** — marker-bounded, insert-once:
 
@@ -95,6 +104,8 @@ rm ~/.claude/.router-off
 python3 ~/.claude/router-session-context.py            # expect: ACTIVE again
 ```
 All three must exit 0 with the expected strings. **Do not leave `.router-off` behind.**
+
+Blank output with exit 0 means the plugin opt-in gate came along in the copy. Re-copy the hook per Phase 3.
 
 **4b. Files landed (Tier 1):**
 ```bash
