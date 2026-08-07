@@ -50,6 +50,12 @@ Match a unit's shape to a row; apply the constraint layer first. Each row lists 
 
 **Coordinator-relative rate gap.** Offload pays more the wider the coordinator↔worker cost gap. Read the active session model at plan time: a frontier-tier session model → gap to Haiku is ~10x, offload is cheap; a mid-tier session model → gap ~5x. Codex under a ChatGPT plan is flat-rate (near-zero marginal until the usage window) but carries a minutes-scale latency tax — worth it for work that takes minutes anyway, a loss for small synchronous edits.
 
+### Fallback ladder: a planned unit with no manifest row
+
+At execution, a unit belonging to a plan may have no routing assignment, because the plan was never routed or because it was deepened after routing and the new U-ID never got a row. Work that unit inline, note the gap, and offer a `route-plan` run rather than picking an executor off this table on the spot. A plan's units are meant to be routed as a set, and a one-off pick made mid-execution is the kind of drift §5 exists to catch.
+
+This governs **planned** units only. Ad-hoc (non-plan) dispatch straight from this table is a sanctioned path, as the intro states, and its outcome line has its own home (§6).
+
 ---
 
 ## 3. Cell format & flip thresholds
