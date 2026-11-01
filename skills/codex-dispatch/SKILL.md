@@ -9,7 +9,9 @@ Hand one implementation unit to Codex, then verify its output yourself. Codex ou
 
 **Kill switch:** if `~/.claude/.router-off` exists, do not dispatch — work the unit inline. (The SessionStart hook also injects a disable directive; check the file here regardless.)
 
-Model + reasoning effort inherit from `~/.codex/config.toml` (e.g. `gpt-5.6-sol`, effort `medium`). Do NOT pass `-m` or `-c model_reasoning_effort=…` — config.toml is the single source of truth.
+**Model selection is the router's, not the dispatcher's.** The default inherits `~/.codex/config.toml` (e.g. `gpt-5.6-sol`, effort `medium`). A unit pins a tier only through its manifest row: `route-plan` writes `codex-implementer:<model>` when the §2 cell it picked carries a tier suffix (e.g. `codex-implementer:gpt-5.6-luna` on a low-stakes CI/dep/test-bulk unit), and the runner below reads that suffix and passes `-m`. Hand-typing `-m` into a raw `codex exec` is the thing to avoid: it leaves no record of why. Ad-hoc work may pass `--model`/`--effort` to the runner, which validates the id against `CODEX_MODELS.md` and records the model actually used (from the run banner) in the outcome line.
+
+**Use the runner for the ritual.** `~/.claude/bin/codex-dispatch-run` does §1.2 (kill switch, scrub worktree, credential rescan including json files with userinfo), §2 (detached launch, prompt and run.log in a scratch dir, state file under `.worktrees/`), and §4's mechanics (`status` parses the banner; `check` waits, scope-checks changed files against `--files`, runs the load-bearing command inside the worktree, prints the §6 outcome line; `apply --reviewed` integrates the diff and untracked files; `cleanup` removes the worktree). It never commits and `apply` refuses until you say you read the diff. The bash blocks below remain the reference for what it does. Tests: `tests/test_codex_dispatch_run.py`.
 
 ## 1. Pre-dispatch checks (ordered — stop at the first failure)
 

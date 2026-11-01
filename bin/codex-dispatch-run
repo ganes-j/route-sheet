@@ -1,0 +1,388 @@
+#!/usr/bin/python3
+"""codex-dispatch-run: the mechanical half of the codex-dispatch skill (Lane B).
+
+  prepare <unit> --repo R --prompt FILE [--manifest M] [--model ID] [--effort E] [--base REF]
+          [--sandbox workspace-write|read-only] [--allow-uncatalogued]
+      kill-switch check, scrub worktree at R/.worktrees/codex-<unit>, credential rescan of the
+      worktree (env/toml/yaml hosts AND json files with userinfo), model validated against
+      ~/.claude/CODEX_MODELS.md, codex exec launched detached; prints the state as JSON.
+      Model precedence: --model, else the manifest row's `codex-implementer:<model>` suffix,
+      else ~/.codex/config.toml (no -m passed).
+  status  <unit> --repo R           banner fields (model, effort, session id), running, out-of-credits
+  check   <unit> --repo R --verify CMD [--files a,b,...] [--no-wait] [--wait-seconds N]
+      waits for exit, scope-checks changed files, runs CMD inside the worktree, prints the
+      ROUTING_POLICY §6 outcome line with executor codex-implementer:<model actually used>.
+      Exit 0 PASS, 1 FAIL. Never applies anything.
+  apply   <unit> --repo R --reviewed   applies the worktree changes (tracked, staged and new) to R in one atomic git apply.
+      Refuses without --reviewed: the coordinator reads the diff first, always.
+  cleanup <unit> --repo R           removes the worktree and the state file.
+
+Exit codes: 0 ok · 1 check FAIL · 2 kill switch · 3 refused (credential, unignored .worktrees,
+unit already prepared) · 4 bad input.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+CONFIG_FILES = (".env",)
+CONFIG_SUFFIXES = (".env", ".toml", ".yaml", ".yml")
+TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
+LOCAL_HOSTS = re.compile(r"^(localhost|127\.0\.0\.1|::1|0\.0\.0\.0|[^.]+\.local)$")
+URL_RE = re.compile(r"[a-z]+://[^ \"']+", re.I)
+USERINFO_RE = re.compile(r"://[^/\s\"']*@")
+MODEL_ID_RE = re.compile(r"\(`([a-z0-9][a-z0-9.\-]*)`\)")
+BANNER_RE = {"model": re.compile(r"^model:\s*(.+)$", re.M),
+             "effort": re.compile(r"^reasoning effort:\s*(.+)$", re.M),
+             "session_id": re.compile(r"^session id:\s*(.+)$", re.M)}
+CREDITS_RE = re.compile(r"out of credits", re.I)
+
+
+def home():
+    return os.environ.get("HOME") or os.path.expanduser("~")
+
+
+def die(code, msg):
+    sys.stderr.write("codex-dispatch-run: %s\n" % msg)
+    return code
+
+
+def git(repo, *args, check=True):
+    r = subprocess.run(["git", "-C", repo] + list(args), capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError("git %s: %s" % (" ".join(args), r.stderr.strip()))
+    return r.stdout
+
+
+def state_path(repo, unit):
+    return os.path.join(repo, ".worktrees", "codex-%s.state.json" % unit)
+
+
+def load_state(repo, unit):
+    try:
+        with open(state_path(repo, unit), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done == pid:
+            return False
+    except ChildProcessError:
+        pass
+    return True
+
+
+# ------------------------------------------------------------------ catalog + manifest
+
+def catalogued_models():
+    path = os.path.join(home(), ".claude", "CODEX_MODELS.md")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return set(MODEL_ID_RE.findall(fh.read()))
+    except OSError:
+        return set()
+
+
+def model_from_manifest(path, unit):
+    """The `codex-implementer:<model>` suffix on the unit's assignment row, if any."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    m = re.search(r"^- %s\s*→\s*codex-implementer:([a-z0-9][a-z0-9.\-]*)" % re.escape(unit), text, re.M)
+    return m.group(1) if m else None
+
+
+# ------------------------------------------------------------------ credential rescan
+
+def rescan(root):
+    """Hosts in connection strings and URLs across env/toml/yaml, plus json files carrying userinfo."""
+    hosts, json_hits = set(), []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules")]
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            if name.endswith(TEMPLATE_SUFFIXES):
+                continue
+            is_config = name in CONFIG_FILES or name.startswith(".env.") or name.endswith(CONFIG_SUFFIXES)
+            if is_config:
+                try:
+                    with open(path, encoding="utf-8", errors="ignore") as fh:
+                        for url in URL_RE.findall(fh.read()):
+                            host = re.sub(r"^[a-z]+://", "", url, flags=re.I)
+                            host = re.sub(r"^[^@]*@", "", host)
+                            host = re.split(r"[:/?]", host)[0]
+                            if host and not LOCAL_HOSTS.match(host):
+                                hosts.add(host)
+                except OSError:
+                    pass
+            elif name.endswith(".json"):
+                try:
+                    with open(path, encoding="utf-8", errors="ignore") as fh:
+                        if USERINFO_RE.search(fh.read()):
+                            json_hits.append(os.path.relpath(path, root))
+                except OSError:
+                    pass
+    return sorted(hosts), sorted(json_hits)
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_prepare(a):
+    if os.path.exists(os.path.join(home(), ".claude", ".router-off")):
+        return die(2, "router kill switch present (~/.claude/.router-off); work the unit inline")
+    repo = os.path.abspath(a.repo)
+    try:
+        git(repo, "rev-parse", "--is-inside-work-tree")
+    except RuntimeError as e:
+        return die(4, str(e))
+    if not os.path.isfile(a.prompt):
+        return die(4, "prompt file not found: " + a.prompt)
+    if subprocess.run(["git", "-C", repo, "check-ignore", "-q", ".worktrees/"]).returncode != 0:
+        return die(3, ".worktrees/ is not gitignored in %s; add it before scrubbing here" % repo)
+    wt = os.path.join(repo, ".worktrees", "codex-%s" % a.unit)
+    if os.path.exists(state_path(repo, a.unit)) or os.path.isdir(wt):
+        return die(3, "unit %s already exists (worktree or state); run cleanup first" % a.unit)
+
+    model = a.model or (model_from_manifest(a.manifest, a.unit) if a.manifest else None)
+    if model and not a.allow_uncatalogued and model not in catalogued_models():
+        return die(4, "model %r is not in CODEX_MODELS.md; pass --allow-uncatalogued to override" % model)
+    if a.effort and a.effort not in ("low", "medium", "high"):
+        return die(4, "effort must be low, medium or high")
+
+    os.makedirs(os.path.join(repo, ".worktrees"), exist_ok=True)
+    try:
+        git(repo, "worktree", "add", "-q", wt, a.base)
+    except RuntimeError as e:
+        return die(4, str(e))
+    hosts, json_hits = rescan(wt)
+    if hosts or json_hits:
+        git(repo, "worktree", "remove", "--force", wt, check=False)
+        parts = []
+        if hosts:
+            parts.append("non-local host(s) in env/toml/yaml: " + ", ".join(hosts))
+        if json_hits:
+            parts.append("json file(s) with userinfo in a URL: " + ", ".join(json_hits))
+        return die(3, "credential still present in the scrub worktree; hard-skip Codex for this unit. " + "; ".join(parts))
+
+    scratch = tempfile.mkdtemp(prefix="codex-dispatch-%s-" % a.unit)
+    argv = ["codex", "exec", "-s", a.sandbox]
+    if model:
+        argv += ["-m", model]
+    if a.effort:
+        argv += ["-c", "model_reasoning_effort=%s" % a.effort]
+    argv += ["-C", wt, "-o", os.path.join(scratch, "last-message.txt"), "-"]
+    shutil.copy(a.prompt, os.path.join(scratch, "prompt.md"))
+    log = open(os.path.join(scratch, "run.log"), "wb")
+    with open(a.prompt, "rb") as prompt_in:
+        proc = subprocess.Popen(argv, stdin=prompt_in, stdout=log, stderr=subprocess.STDOUT,
+                                cwd=wt, start_new_session=True)
+    log.close()
+    state = {"unit": a.unit, "repo": repo, "worktree": wt, "base": git(repo, "rev-parse", "--short", a.base).strip(),
+             "scratch": scratch, "pid": proc.pid, "model_requested": model, "effort_requested": a.effort,
+             "sandbox": a.sandbox, "started": time.time(), "argv": argv}
+    with open(state_path(repo, a.unit), "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=1)
+    print(json.dumps(state))
+    return 0
+
+
+def read_status(state):
+    log_path = os.path.join(state["scratch"], "run.log")
+    try:
+        with open(log_path, encoding="utf-8", errors="ignore") as fh:
+            log = fh.read()
+    except OSError:
+        log = ""
+    fields = {k: (rx.search(log).group(1).strip() if rx.search(log) else None) for k, rx in BANNER_RE.items()}
+    fields.update({
+        "unit": state["unit"], "worktree": state["worktree"], "scratch": state["scratch"], "pid": state["pid"],
+        "running": process_alive(state["pid"]), "out_of_credits": bool(CREDITS_RE.search(log)),
+        "model_requested": state.get("model_requested"),
+        "last_message_present": os.path.exists(os.path.join(state["scratch"], "last-message.txt")),
+        "log_tail": log[-600:],
+    })
+    return fields
+
+
+def cmd_status(a):
+    state = load_state(os.path.abspath(a.repo), a.unit)
+    if not state:
+        return die(4, "no state for unit %s in %s" % (a.unit, a.repo))
+    print(json.dumps(read_status(state)))
+    return 0
+
+
+def changed_paths(wt):
+    out = git(wt, "status", "--porcelain", "--untracked-files=all")
+    paths = []
+    for line in out.splitlines():
+        if len(line) > 3:
+            paths.append(line[3:].strip().strip('"'))
+    return paths
+
+
+def cmd_check(a):
+    repo = os.path.abspath(a.repo)
+    state = load_state(repo, a.unit)
+    if not state:
+        return die(4, "no state for unit %s in %s" % (a.unit, a.repo))
+    if a.no_wait and process_alive(state["pid"]):
+        return die(3, "codex is still running for unit %s (pid %d); check without --no-wait" % (a.unit, state["pid"]))
+    if not a.no_wait:
+        deadline = time.time() + a.wait_seconds
+        while process_alive(state["pid"]) and time.time() < deadline:
+            time.sleep(0.5)
+        if process_alive(state["pid"]):
+            os.killpg(os.getpgid(state["pid"]), signal.SIGTERM)
+            status = read_status(state)
+            line = outcome_line(a.unit, status, "FAIL", a.verify, "n/a", note="hang: killed at %ds" % a.wait_seconds)
+            return finish(state, line, 1)
+    status = read_status(state)
+    wt = state["worktree"]
+    changed = changed_paths(wt)
+    allowed = [p.strip() for p in (a.files or "").split(",") if p.strip()]
+    problems = []
+    if not changed:
+        problems.append("empty diff")
+    if allowed:
+        rogue = [p for p in changed if p not in allowed]
+        if rogue:
+            problems.append("out-of-scope file(s): " + ", ".join(rogue))
+    if status["out_of_credits"]:
+        problems.append("codex reported out of credits")
+    result = "n/a"
+    if not problems or (changed and status["out_of_credits"] and len(problems) == 1):
+        r = subprocess.run(["sh", "-c", a.verify], cwd=wt, capture_output=True, text=True)
+        result = "green" if r.returncode == 0 else "red"
+        if result == "red":
+            problems.append("re-check red")
+    passed = result == "green" and not [p for p in problems if "out of credits" not in p]
+    note = "; ".join(problems) if problems else None
+    line = outcome_line(a.unit, status, "PASS" if passed else "FAIL", a.verify, result, note=note)
+    print("changed: " + (", ".join(changed) if changed else "(none)"))
+    return finish(state, line, 0 if passed else 1)
+
+
+def outcome_line(unit, status, verdict, verify, result, note=None):
+    model = status.get("model") or status.get("model_requested") or "config"
+    line = "%s · codex-implementer:%s · %s · re-check %s %s · 0 fix rounds · %s · %s" % (
+        unit, model, verdict, verify, result, status.get("session_id") or "na", time.strftime("%Y-%m-%d"))
+    if note:
+        line += " · note: " + note
+    return line
+
+
+def finish(state, line, code):
+    with open(os.path.join(state["scratch"], "outcome.txt"), "w", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+    print(line)
+    return code
+
+
+def cmd_apply(a):
+    repo = os.path.abspath(a.repo)
+    state = load_state(repo, a.unit)
+    if not state:
+        return die(4, "no state for unit %s in %s" % (a.unit, a.repo))
+    if not a.reviewed:
+        return die(4, "refusing to apply an unreviewed diff; read `git -C %s diff` and the untracked files, then pass --reviewed" % state["worktree"])
+    wt = state["worktree"]
+    # One staged diff against HEAD, applied by a single atomic `git apply`: it carries files Codex
+    # staged itself, keeps symlinks as links, and leaves the repo untouched if any part fails.
+    git(wt, "add", "-A")
+    diff = git(wt, "diff", "--cached", "--binary", "HEAD")
+    files = [p for p in git(wt, "diff", "--cached", "--name-only", "HEAD").splitlines() if p]
+    added = [p for p in git(wt, "diff", "--cached", "--name-only", "--diff-filter=A", "HEAD").splitlines() if p]
+    clashes = [p for p in added if os.path.lexists(os.path.join(repo, p))]
+    if clashes and not a.force:
+        return die(1, "file(s) already exist in the repo: %s (pass --force to overwrite)" % ", ".join(clashes))
+    if not diff.strip():
+        print(json.dumps({"applied_diff": False, "files": []}))
+        return 0
+    backup = os.path.join(state["scratch"], "apply-backup")
+    for rel in clashes:
+        os.makedirs(os.path.dirname(os.path.join(backup, rel)), exist_ok=True)
+        shutil.move(os.path.join(repo, rel), os.path.join(backup, rel))
+    r = subprocess.run(["git", "-C", repo, "apply", "--binary", "-"], input=diff, capture_output=True, text=True)
+    if r.returncode != 0:
+        for rel in clashes:
+            shutil.move(os.path.join(backup, rel), os.path.join(repo, rel))
+        return die(1, "git apply failed; the repo is unchanged: " + r.stderr.strip())
+    print(json.dumps({"applied_diff": True, "files": files}))
+    return 0
+
+
+def cmd_cleanup(a):
+    repo = os.path.abspath(a.repo)
+    state = load_state(repo, a.unit)
+    wt = state["worktree"] if state else os.path.join(repo, ".worktrees", "codex-%s" % a.unit)
+    if state and process_alive(state["pid"]):
+        return die(3, "codex is still running for unit %s (pid %d); check or kill it first" % (a.unit, state["pid"]))
+    git(repo, "worktree", "remove", "--force", wt, check=False)
+    git(repo, "worktree", "prune", check=False)
+    try:
+        os.remove(state_path(repo, a.unit))
+    except OSError:
+        pass
+    print(json.dumps({"removed": wt, "scratch_kept": state.get("scratch") if state else None}))
+    return 0
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="codex-dispatch-run", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def common(sp):
+        sp.add_argument("unit")
+        sp.add_argument("--repo", required=True)
+
+    s = sub.add_parser("prepare"); common(s)
+    s.add_argument("--prompt", required=True)
+    s.add_argument("--manifest", default=None, help="routing manifest; the unit row may carry codex-implementer:<model>")
+    s.add_argument("--model", default=None)
+    s.add_argument("--effort", default=None)
+    s.add_argument("--base", default="HEAD")
+    s.add_argument("--sandbox", default="workspace-write", choices=("workspace-write", "read-only"))
+    s.add_argument("--allow-uncatalogued", action="store_true")
+    s.set_defaults(func=cmd_prepare)
+    s = sub.add_parser("status"); common(s); s.set_defaults(func=cmd_status)
+    s = sub.add_parser("check"); common(s)
+    s.add_argument("--verify", required=True)
+    s.add_argument("--files", default="")
+    s.add_argument("--no-wait", action="store_true")
+    s.add_argument("--wait-seconds", type=int, default=1800)
+    s.set_defaults(func=cmd_check)
+    s = sub.add_parser("apply"); common(s)
+    s.add_argument("--reviewed", action="store_true")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(func=cmd_apply)
+    s = sub.add_parser("cleanup"); common(s); s.set_defaults(func=cmd_cleanup)
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
