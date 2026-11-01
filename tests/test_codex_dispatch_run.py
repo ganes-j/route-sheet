@@ -53,6 +53,9 @@ echo "reasoning summaries: none"
 echo "session id: 01a1-test-session"
 echo "--------"
 if [ -n "$FAKE_CODEX_EDIT" ]; then printf 'edited by fake codex\n' >> "$wd/$FAKE_CODEX_EDIT"; fi
+if [ -n "$FAKE_CODEX_LINK" ]; then ln -s "$FAKE_CODEX_LINK_TARGET" "$wd/$FAKE_CODEX_LINK"; fi
+if [ -n "$FAKE_CODEX_STAGE" ]; then git -C "$wd" add -A; fi
+if [ -n "$FAKE_CODEX_SLEEP" ]; then sleep "$FAKE_CODEX_SLEEP"; fi
 if [ -n "$FAKE_CODEX_CREDITS" ]; then echo "ERROR: Your workspace is out of credits. Ask your workspace owner to refill in order to continue."; fi
 echo "done"
 '''
@@ -93,7 +96,8 @@ class Harness(unittest.TestCase):
         self.env = dict(os.environ, HOME=self.home, FAKE_CODEX_ARGS=self.args_file,
                         PATH=self.bin + os.pathsep + os.environ.get("PATH", ""))
         self.env.pop("FAKE_CODEX_EDIT", None)
-        self.env.pop("FAKE_CODEX_CREDITS", None)
+        for var in ("FAKE_CODEX_CREDITS", "FAKE_CODEX_LINK", "FAKE_CODEX_LINK_TARGET", "FAKE_CODEX_STAGE", "FAKE_CODEX_SLEEP"):
+            self.env.pop(var, None)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -178,6 +182,15 @@ class Prepare(Harness):
         self.assertIn("db-prod.example.com", err)
         self.assertFalse(os.path.isdir(os.path.join(self.repo, ".worktrees", "codex-U9")))
 
+    def test_uppercase_scheme_credential_hard_skips(self):
+        with open(os.path.join(self.repo, "settings.yaml"), "w") as fh:
+            fh.write("db: POSTGRES://%s@db-prod.example.com:5432/x\n" % USERINFO)
+        git(self.repo, "add", "settings.yaml")
+        git(self.repo, "commit", "-q", "-m", "cred")
+        code, state, err = self.prepare()
+        self.assertEqual(code, 3)
+        self.assertIn("db-prod.example.com", err)
+
     def test_gitignored_env_is_scrubbed_by_the_worktree(self):
         with open(os.path.join(self.repo, ".env"), "w") as fh:
             fh.write("DATABASE_URL=postgres://%s@db-prod.example.com/x\n" % USERINFO)
@@ -247,6 +260,16 @@ class StatusAndCheck(Harness):
         self.assertIn("rogue.txt", out + err)
         self.assertIn("· FAIL ·", out)
 
+    def test_check_no_wait_refuses_while_codex_is_running(self):
+        env = dict(self.env, FAKE_CODEX_EDIT="app.py", FAKE_CODEX_SLEEP="5")
+        code, state, _ = self.prepare(env=env)
+        code, out, err = self.run_tool("check", "U9", "--repo", self.repo, "--files", "app.py",
+                                       "--verify", "true", "--no-wait")
+        self.assertEqual(code, 3)
+        self.assertIn("still running", err)
+        self.assertNotIn("PASS", out)
+        os.killpg(os.getpgid(state["pid"]), 15)
+
     def test_check_fails_when_verify_is_red_or_diff_empty(self):
         code, state, _ = self.prepare()
         self.wait(state)
@@ -285,6 +308,50 @@ class ApplyAndCleanup(Harness):
         code, out, err = self.run_tool("apply", "U9", "--repo", self.repo, "--reviewed")
         self.assertEqual(code, 0, err)
         self.assertTrue(os.path.exists(os.path.join(self.repo, "new_module.py")))
+
+    def test_apply_includes_files_codex_staged(self):
+        env = dict(self.env, FAKE_CODEX_EDIT="staged_module.py", FAKE_CODEX_STAGE="1")
+        code, state, _ = self.prepare(env=env)
+        self.wait(state)
+        code, out, err = self.run_tool("apply", "U9", "--repo", self.repo, "--reviewed")
+        self.assertEqual(code, 0, err)
+        with open(os.path.join(self.repo, "staged_module.py")) as fh:
+            self.assertIn("edited by fake codex", fh.read())
+
+    def test_apply_conflict_leaves_the_repo_untouched(self):
+        env = dict(self.env, FAKE_CODEX_EDIT="new_module.py", FAKE_CODEX_STAGE="1")
+        code, state, _ = self.prepare(env=env)
+        self.wait(state)
+        with open(os.path.join(state["worktree"], "app.py"), "a") as fh:
+            fh.write("tracked edit\n")
+        with open(os.path.join(self.repo, "new_module.py"), "w") as fh:
+            fh.write("mine\n")
+        code, out, err = self.run_tool("apply", "U9", "--repo", self.repo, "--reviewed")
+        self.assertEqual(code, 1)
+        self.assertIn("new_module.py", err)
+        with open(os.path.join(self.repo, "app.py")) as fh:
+            self.assertNotIn("tracked edit", fh.read())
+        with open(os.path.join(self.repo, "new_module.py")) as fh:
+            self.assertEqual(fh.read(), "mine\n")
+        code, out, err = self.run_tool("apply", "U9", "--repo", self.repo, "--reviewed", "--force")
+        self.assertEqual(code, 0, err)
+        with open(os.path.join(self.repo, "app.py")) as fh:
+            self.assertIn("tracked edit", fh.read())
+        with open(os.path.join(self.repo, "new_module.py")) as fh:
+            self.assertIn("edited by fake codex", fh.read())
+
+    def test_untracked_symlink_is_applied_as_a_link(self):
+        secret = os.path.join(self.tmp.name, "outside.txt")
+        with open(secret, "w") as fh:
+            fh.write("outside contents\n")
+        env = dict(self.env, FAKE_CODEX_LINK="link.txt", FAKE_CODEX_LINK_TARGET=secret)
+        code, state, _ = self.prepare(env=env)
+        self.wait(state)
+        code, out, err = self.run_tool("apply", "U9", "--repo", self.repo, "--reviewed")
+        self.assertEqual(code, 0, err)
+        dst = os.path.join(self.repo, "link.txt")
+        self.assertTrue(os.path.islink(dst))
+        self.assertEqual(os.readlink(dst), secret)
 
     def test_cleanup_removes_worktree_and_state(self):
         code, state, _ = self.prepare()

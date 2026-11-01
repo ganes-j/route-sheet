@@ -13,7 +13,7 @@
       waits for exit, scope-checks changed files, runs CMD inside the worktree, prints the
       ROUTING_POLICY §6 outcome line with executor codex-implementer:<model actually used>.
       Exit 0 PASS, 1 FAIL. Never applies anything.
-  apply   <unit> --repo R --reviewed   applies the worktree diff and copies untracked files into R.
+  apply   <unit> --repo R --reviewed   applies the worktree changes (tracked, staged and new) to R in one atomic git apply.
       Refuses without --reviewed: the coordinator reads the diff first, always.
   cleanup <unit> --repo R           removes the worktree and the state file.
 
@@ -35,7 +35,7 @@ CONFIG_FILES = (".env",)
 CONFIG_SUFFIXES = (".env", ".toml", ".yaml", ".yml")
 TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 LOCAL_HOSTS = re.compile(r"^(localhost|127\.0\.0\.1|::1|0\.0\.0\.0|[^.]+\.local)$")
-URL_RE = re.compile(r"[a-z]+://[^ \"']+")
+URL_RE = re.compile(r"[a-z]+://[^ \"']+", re.I)
 USERINFO_RE = re.compile(r"://[^/\s\"']*@")
 MODEL_ID_RE = re.compile(r"\(`([a-z0-9][a-z0-9.\-]*)`\)")
 BANNER_RE = {"model": re.compile(r"^model:\s*(.+)$", re.M),
@@ -126,7 +126,7 @@ def rescan(root):
                 try:
                     with open(path, encoding="utf-8", errors="ignore") as fh:
                         for url in URL_RE.findall(fh.read()):
-                            host = re.sub(r"^[a-z]+://", "", url)
+                            host = re.sub(r"^[a-z]+://", "", url, flags=re.I)
                             host = re.sub(r"^[^@]*@", "", host)
                             host = re.split(r"[:/?]", host)[0]
                             if host and not LOCAL_HOSTS.match(host):
@@ -244,6 +244,8 @@ def cmd_check(a):
     state = load_state(repo, a.unit)
     if not state:
         return die(4, "no state for unit %s in %s" % (a.unit, a.repo))
+    if a.no_wait and process_alive(state["pid"]):
+        return die(3, "codex is still running for unit %s (pid %d); check without --no-wait" % (a.unit, state["pid"]))
     if not a.no_wait:
         deadline = time.time() + a.wait_seconds
         while process_alive(state["pid"]) and time.time() < deadline:
@@ -303,24 +305,28 @@ def cmd_apply(a):
     if not a.reviewed:
         return die(4, "refusing to apply an unreviewed diff; read `git -C %s diff` and the untracked files, then pass --reviewed" % state["worktree"])
     wt = state["worktree"]
-    diff = git(wt, "diff", "--binary")
-    if diff.strip():
-        r = subprocess.run(["git", "-C", repo, "apply", "-"], input=diff, capture_output=True, text=True)
-        if r.returncode != 0:
-            return die(1, "git apply failed: " + r.stderr.strip())
-    copied = []
-    for rel in changed_paths(wt):
-        src = os.path.join(wt, rel)
-        dst = os.path.join(repo, rel)
-        tracked = subprocess.run(["git", "-C", wt, "ls-files", "--error-unmatch", rel], capture_output=True).returncode == 0
-        if tracked or not os.path.isfile(src):
-            continue
-        if os.path.exists(dst) and not a.force:
-            return die(1, "untracked file already exists in the repo: %s (pass --force to overwrite)" % rel)
-        os.makedirs(os.path.dirname(dst) or repo, exist_ok=True)
-        shutil.copy2(src, dst)
-        copied.append(rel)
-    print(json.dumps({"applied_diff": bool(diff.strip()), "copied_untracked": copied}))
+    # One staged diff against HEAD, applied by a single atomic `git apply`: it carries files Codex
+    # staged itself, keeps symlinks as links, and leaves the repo untouched if any part fails.
+    git(wt, "add", "-A")
+    diff = git(wt, "diff", "--cached", "--binary", "HEAD")
+    files = [p for p in git(wt, "diff", "--cached", "--name-only", "HEAD").splitlines() if p]
+    added = [p for p in git(wt, "diff", "--cached", "--name-only", "--diff-filter=A", "HEAD").splitlines() if p]
+    clashes = [p for p in added if os.path.lexists(os.path.join(repo, p))]
+    if clashes and not a.force:
+        return die(1, "file(s) already exist in the repo: %s (pass --force to overwrite)" % ", ".join(clashes))
+    if not diff.strip():
+        print(json.dumps({"applied_diff": False, "files": []}))
+        return 0
+    backup = os.path.join(state["scratch"], "apply-backup")
+    for rel in clashes:
+        os.makedirs(os.path.dirname(os.path.join(backup, rel)), exist_ok=True)
+        shutil.move(os.path.join(repo, rel), os.path.join(backup, rel))
+    r = subprocess.run(["git", "-C", repo, "apply", "--binary", "-"], input=diff, capture_output=True, text=True)
+    if r.returncode != 0:
+        for rel in clashes:
+            shutil.move(os.path.join(backup, rel), os.path.join(repo, rel))
+        return die(1, "git apply failed; the repo is unchanged: " + r.stderr.strip())
+    print(json.dumps({"applied_diff": True, "files": files}))
     return 0
 
 
