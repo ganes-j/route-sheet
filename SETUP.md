@@ -42,7 +42,7 @@ Present the exact write list for the target tier and get a yes before any write.
 - Merge → one SessionStart hook entry into `~/.claude/settings.json`
 - Insert → the marker-bounded block from `templates/claude-md-router-section.md` into `~/.claude/CLAUDE.md`
 
-**Tier 2 adds:** copy → `~/.claude/skills/codex-dispatch/SKILL.md`. (No writes to `~/.codex/` — ever.)
+**Tier 2 adds:** copy → `~/.claude/skills/codex-dispatch/SKILL.md`, `~/.claude/bin/codex-dispatch-run` (`chmod +x`; from `bin/`), `~/.claude/CODEX_MODELS.md` (from `templates/`; the runner validates a tier suffix against it). (No writes to `~/.codex/` — ever.)
 
 **Tier 3 adds:** copy → `~/.claude/bin/llocal` (`chmod +x`), copy → `~/.claude/LOCAL_MODELS.md`.
 

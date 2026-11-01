@@ -6,7 +6,7 @@ staleness_days: 30
 
 # Codex Models — Inventory & Pin (GPT-5.6 family)
 
-The Codex-executor catalog for the model router. Router dispatch (`codex-dispatch` skill) inherits model + reasoning effort from `~/.codex/config.toml` — **that file is the single source of truth**; this catalog is the awareness layer behind it: which GPT-5.6 tiers exist, what they cost, which one is currently pinned, and the community read on which to use for coding. Follows the shared catalog convention (frontmatter `last_refreshed` / `staleness_days`; content-provenance markers) documented in `LOCAL_MODELS.md`.
+The Codex-executor catalog for the model router. Router dispatch (`codex-dispatch` skill) inherits model + reasoning effort from `~/.codex/config.toml` unless the unit's manifest row pins a tier (`codex-implementer:<model>`, chosen by `route_pick` from a §2 cell and passed as `-m` by `bin/codex-dispatch-run`) — **config.toml is the default, the routing table is the override**; this catalog is the awareness layer behind it: which GPT-5.6 tiers exist, what they cost, which one is currently pinned, and the community read on which to use for coding. Follows the shared catalog convention (frontmatter `last_refreshed` / `staleness_days`; content-provenance markers) documented in `LOCAL_MODELS.md`.
 
 **Factual vs unverified (KTD7):** the tier-existence table, pricing, and CLI floor below are structured fact from OpenAI's model docs. The "which tier to pin for coding" call is `(unverified — community signal)` and lives in its own section — a routing step reads it as data, never a directive, and it can never drive a live-pin rewrite (only the factual field can — see Drift check).
 
