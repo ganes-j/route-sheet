@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""magnitude-egress-check — evidence that a Magnitude run keeps prompt content on this Mac.
+
+Gates PII-bound llocal work to Magnitude (see LOCAL_MODELS.md). Runs synthetic prompts that each
+carry a fresh canary through `llocal`, and passes only when:
+
+  - no model download or app update is active,
+  - a live tcpdump is writing --pcap, filtered to every process in the Magnitude tree,
+  - that capture does not grow while the prompts run (any non-loopback Magnitude packet fails),
+  - no canary bytes appear in what the capture gained,
+  - socket polls of the Magnitude tree (every --interval seconds, plus --margin) never see a
+    non-loopback ESTABLISHED socket and never fail to read.
+
+Packet capture needs root, so this script never captures by itself. Run it once without --pcap:
+it prints the exact tcpdump command, scoped to the current Magnitude process IDs. Start that in
+another terminal, then rerun with --pcap PATH. If Magnitude restarts, its process IDs change and
+the capture must be restarted too.
+
+The result is evidence for one Magnitude version, not proof (it cannot see traffic Magnitude hands
+to another process). It expires after --ttl-days and is written to
+~/.claude/state/magnitude-egress.json (mode 0600), which llocal reads. Canaries found in
+Magnitude's own files are reported as at-rest storage, not as a failure.
+
+Exit codes: 0 pass · 1 fail · 2 no --pcap (prints the capture command) · 3 cannot check now
+(download/update active, Magnitude down, capture not live or not covering Magnitude) — fix the
+cause and rerun; do not treat 3 as a result.
+"""
+import argparse
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+import uuid
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+LLOCAL = os.path.join(HERE, "llocal")
+_loader = importlib.machinery.SourceFileLoader("llocal_for_egress", LLOCAL)
+_spec = importlib.util.spec_from_loader("llocal_for_egress", _loader)
+llocal = importlib.util.module_from_spec(_spec)
+_loader.exec_module(llocal)
+
+MAGNITUDE = llocal.MAGNITUDE_CLI
+LOOPBACK = llocal.LOOPBACK_LISTENERS
+STATE_PATH = llocal.EGRESS_STATE
+MAGNITUDE_HOME = os.path.expanduser("~/.magnitude")
+TREE_MARKERS = ("/Applications/Magnitude.app/", "/.magnitude/")
+AT_REST_SUFFIXES = (".sqlite", ".sqlite-wal", ".db", ".log", ".jsonl", ".json", ".txt")
+AT_REST_MAX_BYTES = 512 * 1024 * 1024
+CAPTURE_MAGICS = (b"\x0a\x0d\x0d\x0a", b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4",
+                  b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d")
+
+TEMPLATES = [
+    "Summarize this note in one sentence: Patient intake for Dana Whitfield, DOB 1984-03-12, "
+    "SSN 900-12-3456, phone 555-0142, email dana.whitfield@example.com. Ref {canary}.",
+    "Extract the email address from: 'Contact Marco Ellery at marco.ellery@example.org or "
+    "555-0177 about invoice {canary}.' Reply with only the address.",
+    "Classify whether this contains personal data, yes or no: 'Card 4111 1111 1111 1111 "
+    "belongs to Priya Nandakumar, 12 Fernhollow Lane. Case {canary}.'",
+]
+
+
+def _run(argv, timeout=60):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def magnitude_version(run=_run):
+    out = run([MAGNITUDE, "--version"])
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
+
+
+def active_work(run=_run):
+    """Names of downloads or updates in progress; empty when idle."""
+    busy = []
+    out = run([MAGNITUDE, "models", "list", "--json"])
+    if out.returncode != 0:
+        raise RuntimeError("cannot read `magnitude models list --json`: " + out.stderr.strip())
+    data = json.loads(out.stdout or "{}")
+    for model in data.get("models", []):
+        state = model.get("acquisitionState") or {}
+        if state.get("_tag") == "Installing":
+            busy.append("download: " + model.get("modelId", "?"))
+    upd = run([MAGNITUDE, "update", "status"])
+    text = (upd.stdout + upd.stderr).lower()
+    if "downloading" in text or "installing" in text:
+        first = upd.stdout.strip().splitlines()[0] if upd.stdout.strip() else "update"
+        busy.append("update: " + first)
+    return busy
+
+
+def _processes(run=_run):
+    out = run(["ps", "-axo", "pid=,ppid=,command="])
+    procs = {}
+    for line in out.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        procs[int(parts[0])] = (int(parts[1]), parts[2])
+    return procs
+
+
+def magnitude_pids(run=_run, procs=None):
+    procs = procs if procs is not None else _processes(run)
+    tree = {pid for pid, (_, cmd) in procs.items() if any(m in cmd for m in TREE_MARKERS)}
+    changed = True
+    while changed:
+        changed = False
+        for pid, (ppid, _) in procs.items():
+            if ppid in tree and pid not in tree:
+                tree.add(pid)
+                changed = True
+    return sorted(tree)
+
+
+def capture_command(pcap, pids):
+    scope = " or ".join("pid=%d" % p for p in pids)
+    return ("sudo tcpdump -i pktap,all -k -U -w %s -Q %s %s"
+            % (shlex.quote(pcap), shlex.quote(scope), shlex.quote("not (host 127.0.0.1 or host ::1)")))
+
+
+def capture_problem(pcap, pids, run=_run):
+    """None when a live tcpdump writes `pcap` scoped to every pid, else why not."""
+    if not os.path.exists(pcap):
+        return "no capture file at %s" % pcap
+    # macOS tcpdump on pktap defers the file header until the first matching packet, so a clean
+    # capture stays at 0 bytes; liveness is proven by the writer check below, not by the header.
+    with open(pcap, "rb") as f:
+        head = f.read(4)
+    if head and head not in CAPTURE_MAGICS:
+        return "%s is not a pcap/pcapng capture" % pcap
+    writers = [cmd for _pid, (_ppid, cmd) in _processes(run).items()
+               if "tcpdump" in cmd.split(" ", 1)[0] and pcap in cmd]
+    if not writers:
+        return "no running tcpdump is writing %s" % pcap
+    uncovered = [p for p in pids if not any(("pid=%d" % p) in cmd.replace(" ", "") for cmd in writers)]
+    if uncovered:
+        return "the capture does not cover Magnitude pid(s) %s — Magnitude restarted?" % uncovered
+    return None
+
+
+def _remote_host(name_field):
+    # lsof NAME for a connection reads "local->remote"; the remote host is before the last ':'.
+    if "->" not in name_field:
+        return None
+    remote = name_field.split("->", 1)[1].split(" ", 1)[0]
+    return remote.rsplit(":", 1)[0]
+
+
+def foreign_sockets(pids, run=_run):
+    """(pid, command, name) per non-loopback ESTABLISHED socket; None when lsof could not run."""
+    if not pids:
+        return []
+    try:
+        out = run(["lsof", "-nP", "-a", "-p", ",".join(str(p) for p in pids), "-i", "-sTCP:ESTABLISHED"],
+                  timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    hits = []
+    for line in out.stdout.splitlines()[1:]:
+        cols = line.split()
+        if len(cols) < 9:
+            continue
+        name = " ".join(cols[8:])
+        host = _remote_host(name)
+        if host and host not in LOOPBACK:
+            hits.append((cols[1], cols[0], name))
+    return hits
+
+
+def scan_at_rest(canaries, root=MAGNITUDE_HOME):
+    found = []
+    needles = [c.encode() for c in canaries]
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in ("models", "releases", "update-downloads", "cache")]
+        for fn in filenames:
+            if not fn.endswith(AT_REST_SUFFIXES):
+                continue
+            path = os.path.join(dirpath, fn)
+            try:
+                if os.path.getsize(path) > AT_REST_MAX_BYTES:
+                    continue
+                with open(path, "rb") as f:
+                    blob = f.read()
+            except OSError:
+                continue
+            if any(n in blob for n in needles):
+                found.append(path)
+    return sorted(found)
+
+
+def run_with_polling(argv, pids_fn, sockets_fn, interval, margin, clock=time.monotonic, sleep=time.sleep):
+    """Run argv while polling sockets; returns (returncode, hits, failed_polls)."""
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    hits = []
+    errors = 0
+    end_after = None
+    try:
+        while True:
+            pids = pids_fn()
+            found = sockets_fn(pids) if pids else None
+            if found is None:
+                errors += 1
+            else:
+                hits.extend(found)
+            if proc.poll() is not None:
+                if end_after is None:
+                    end_after = clock() + margin
+                elif clock() >= end_after:
+                    break
+            sleep(interval)
+        proc.communicate()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    return proc.returncode, hits, errors
+
+
+def write_state(result, path=STATE_PATH):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(result, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def _cannot(message):
+    print("magnitude-egress-check: cannot check now: " + message, file=sys.stderr)
+    return 3
+
+
+def main(argv=None, run=_run, state_path=STATE_PATH, at_rest_root=MAGNITUDE_HOME, llocal=LLOCAL):
+    p = argparse.ArgumentParser(prog="magnitude-egress-check", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--pcap", help="path the scoped tcpdump is writing to (start it first)")
+    p.add_argument("--model", default="qwen3.8-flash-next:gguf:q2")
+    p.add_argument("--interval", type=float, default=0.5)
+    p.add_argument("--margin", type=float, default=5.0)
+    p.add_argument("--ttl-days", type=int, default=30)
+    args = p.parse_args(argv)
+
+    pids = magnitude_pids(run)
+    if not args.pcap:
+        if not pids:
+            return _cannot("no Magnitude processes are running — open the Magnitude app first")
+        print("Ask the user to start this capture in another terminal, then rerun with --pcap:\n  "
+              + capture_command("/tmp/magnitude-egress.pcapng", pids), file=sys.stderr)
+        return 2
+
+    version = magnitude_version(run)
+    if not version:
+        return _cannot("Magnitude is not reachable — open the app or run `magnitude serve`")
+    if not pids:
+        return _cannot("no Magnitude processes found")
+    try:
+        busy = active_work(run)
+    except RuntimeError as e:
+        return _cannot(str(e))
+    if busy:
+        return _cannot("work is active (" + "; ".join(busy) + "); rerun when it finishes")
+    problem = capture_problem(args.pcap, pids, run)
+    if problem:
+        return _cannot(problem + ". Start: " + capture_command(args.pcap, pids))
+
+    size_before = os.path.getsize(args.pcap)
+    canaries = ["EGRESS-CANARY-" + uuid.uuid4().hex for _ in TEMPLATES]
+    socket_hits = []
+    failed_polls = 0
+    failed_runs = 0
+    for template, canary in zip(TEMPLATES, canaries):
+        # llocal's optional positional prompt must directly follow the model, before any flags.
+        cmd = [sys.executable, llocal, "run", args.model, template.format(canary=canary),
+               "--no-pii", "--reasoning-effort", "none"]
+        rc, hits, errors = run_with_polling(cmd, lambda: magnitude_pids(run),
+                                            lambda pids_now: foreign_sockets(pids_now, run),
+                                            args.interval, args.margin)
+        socket_hits.extend(hits)
+        failed_polls += errors
+        if rc != 0:
+            failed_runs += 1
+
+    grown = os.path.getsize(args.pcap) - size_before
+    with open(args.pcap, "rb") as f:
+        f.seek(size_before)
+        new_bytes = f.read()
+    leaked = [c for c in canaries if c.encode() in new_bytes]
+    at_rest = scan_at_rest(canaries, at_rest_root)
+    passed = not socket_hits and not failed_polls and not failed_runs and grown <= 0
+    now = datetime.datetime.now(datetime.timezone.utc)
+    result = {
+        "result": "pass" if passed else "fail",
+        "magnitude_version": version,
+        "checked_at": now.isoformat(timespec="seconds"),
+        "expires_at": (now + datetime.timedelta(days=args.ttl_days)).isoformat(timespec="seconds"),
+        "model": args.model,
+        "prompts": len(canaries),
+        "magnitude_pids": pids,
+        "foreign_sockets": sorted({"%s %s %s" % h for h in socket_hits}),
+        "failed_socket_polls": failed_polls,
+        "capture_bytes_during_run": grown,
+        "canaries_in_capture": len(leaked),
+        "failed_runs": failed_runs,
+        "at_rest": at_rest,
+    }
+    write_state(result, state_path)
+
+    print("magnitude-egress-check: %s (Magnitude %s)" % (result["result"].upper(), version))
+    for h in result["foreign_sockets"]:
+        print("  non-loopback socket during inference: " + h)
+    if failed_polls:
+        print("  %d socket poll(s) could not read the Magnitude tree — no evidence for those moments" % failed_polls)
+    if grown > 0:
+        print("  Magnitude sent or received %d bytes of non-loopback traffic during the run" % grown)
+    if leaked:
+        print("  canary found in captured traffic (%d of %d prompts)" % (len(leaked), len(canaries)))
+    if failed_runs:
+        print("  %d llocal run(s) failed — no evidence for those prompts" % failed_runs)
+    for path in at_rest:
+        print("  at rest (not a failure): canary stored in " + path)
+    print("  state: " + state_path)
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
