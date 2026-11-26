@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""local-bench — head-to-head benchmark of a local task shape: Ollama incumbent vs challenger.
+
+  local-bench SHAPE --challenger MODEL [--incumbent MODEL] [--workers N] [--effort E]
+              [--cap SECONDS] [--control OLLAMA_MODEL,MAGNITUDE_MODEL] [--limit N]
+
+SHAPE is a fixture set in bench/fixtures (batch-extraction, pii-classification). Every model call
+goes through bin/llocal, one backend resident at a time:
+
+  unload both → warm incumbent → items → unload → warm challenger → items → unload
+  (→ the same for an optional same-model control pair)
+
+Items run in waves of N concurrent `llocal run` calls, each under its own wall-clock cap. A capped
+item counts as not completed and not agreeing; the wave's siblings finish, then the backend is
+unloaded before the next wave. Grading is an exact match on the fixture's expected JSON fields.
+
+Win rule (per shape): the challenger wins when its agreement and completion are each at least the
+incumbent's and its time per task, model load included, is strictly lower. A Magnitude version
+change between start and end makes the run invalid.
+
+Exit codes: 0 verdict printed (either way) · 3 aborted (warm-up failed or unload failed; both
+backends are unloaded and nothing is recorded) · 2 usage error.
+
+Writes bench/results/<UTC stamp>-<shape>.json (llocal's trust gate reads magnitude_version from the
+newest file) and appends one row to the "Benchmarked builds" section of LOCAL_MODELS.md.
+"""
+import argparse
+import datetime
+import glob
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import statistics
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+REPO_ROOT = os.path.dirname(HERE)
+LLOCAL = os.path.join(HERE, "llocal")
+FIXTURES_DIR = os.path.join(REPO_ROOT, "bench", "fixtures")
+RESULTS_DIR = os.path.join(REPO_ROOT, "bench", "results")
+CATALOG = os.path.join(REPO_ROOT, "LOCAL_MODELS.md")
+MAGNITUDE_HUB = os.path.expanduser("~/.magnitude/models/hub")
+SHAPES = ("batch-extraction", "pii-classification")
+DEFAULT_INCUMBENTS = {
+    "batch-extraction": "qwen3.5:35b-a3b-coding-nvfp4",
+    "pii-classification": "qwen3.5:35b-a3b-coding-nvfp4",
+}
+WARMUP_PROMPT = "Reply with the single word OK."
+CATALOG_HEADER = (
+    "\n## Benchmarked builds\n\n"
+    "Written by `bin/local-bench`; full results in `bench/results/`.\n\n"
+    "| Date | Shape | Incumbent | Challenger | Magnitude | Verdict | Challenger sha256 |\n"
+    "|---|---|---|---|---|---|---|\n"
+)
+SPEED_LINE = re.compile(r"prefill ([0-9.e+-]+) tok/s, decode ([0-9.e+-]+) tok/s")
+
+_loader = importlib.machinery.SourceFileLoader("llocal_for_bench", LLOCAL)
+_spec = importlib.util.spec_from_loader("llocal_for_bench", _loader)
+llocal = importlib.util.module_from_spec(_spec)
+_loader.exec_module(llocal)
+
+
+class BenchAbort(Exception):
+    pass
+
+
+def backend_of(model):
+    return llocal._backend_for_model(model)
+
+
+def _first_json_object(text):
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _end = json.JSONDecoder().raw_decode(text[start:])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        start = text.find("{", start + 1)
+    return None
+
+
+def _same(expected, actual):
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return type(expected) is type(actual) and expected == actual
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        return float(expected) == float(actual)
+    return expected == actual
+
+
+def grade(expected, output):
+    if not output:
+        return False
+    got = _first_json_object(output)
+    if got is None:
+        return False
+    return all(key in got and _same(value, got[key]) for key, value in expected.items())
+
+
+def time_per_task(side):
+    return (side["load_seconds"] + side["wall_seconds"]) / side["items"]
+
+
+def challenger_wins(incumbent, challenger):
+    return (challenger["agreed"] >= incumbent["agreed"]
+            and challenger["completed"] >= incumbent["completed"]
+            and time_per_task(challenger) < time_per_task(incumbent))
+
+
+def _flags(model, effort):
+    # Fixtures are synthetic by construction; --pii would need the very benchmark being run.
+    flags = ["--no-pii"]
+    if effort and backend_of(model) == "magnitude":
+        flags += ["--reasoning-effort", effort]
+    return flags
+
+
+def run_side(backend, model, items, workers, effort, cap):
+    flags = _flags(model, effort)
+    warm = backend.run_item(model, WARMUP_PROMPT, flags, cap)
+    if warm["timed_out"] or not (warm["stdout"] or "").strip():
+        raise BenchAbort(f"warm-up for {model} returned no output; nothing was timed")
+    per_item = []
+    started = time.monotonic()
+    for i in range(0, len(items), workers):
+        wave = items[i:i + workers]
+        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+            results = list(pool.map(lambda it: backend.run_item(model, it["prompt"], flags, cap), wave))
+        for item, r in zip(wave, results):
+            per_item.append({
+                "id": item["id"],
+                "seconds": r["seconds"],
+                "timed_out": r["timed_out"],
+                "rc": r["rc"],
+                "output": r["stdout"],
+                "agreed": (not r["timed_out"]) and grade(item["expected"], r["stdout"]),
+                "speed": r["speed"],
+            })
+        if any(r["timed_out"] for r in results):
+            backend.unload(backend_of(model))
+    wall = time.monotonic() - started
+    speeds = [p["speed"] for p in per_item if p["speed"]]
+    return {
+        "model": model,
+        "backend": backend_of(model),
+        "effort": effort if backend_of(model) == "magnitude" else None,
+        "workers": workers,
+        "items": len(items),
+        "completed": sum(1 for p in per_item if not p["timed_out"] and p["rc"] == 0),
+        "agreed": sum(1 for p in per_item if p["agreed"]),
+        "load_seconds": warm["seconds"],
+        "wall_seconds": wall,
+        "first_item_seconds": per_item[0]["seconds"] if per_item else None,
+        "median_prefill_tps": statistics.median(s["prefill"] for s in speeds) if speeds else None,
+        "median_decode_tps": statistics.median(s["decode"] for s in speeds) if speeds else None,
+        "per_item": per_item,
+    }
+
+
+def _pair(backend, incumbent, challenger, items, workers, effort, cap):
+    for name in ("ollama", "magnitude"):
+        backend.unload(name)
+    sides = []
+    for model in (incumbent, challenger):
+        side = run_side(backend, model, items, workers, effort, cap)
+        side["time_per_task"] = time_per_task(side)
+        backend.unload(backend_of(model))
+        sides.append(side)
+    return sides
+
+
+def _append_catalog(path, result):
+    with open(path) as f:
+        text = f.read()
+    if "## Benchmarked builds" not in text:
+        text = text.rstrip("\n") + "\n" + CATALOG_HEADER
+    row = "| %s | %s | %s | %s | %s | %s | %s |\n" % (
+        result["date"], result["shape"], result["incumbent"]["model"], result["challenger"]["model"],
+        result["magnitude_version"], result["verdict"],
+        ", ".join(result["challenger"]["provenance"].get("sha256", [])) or "n/a")
+    with open(path, "w") as f:
+        f.write(text + row)
+
+
+def benchmark(backend, shape, challenger, items, incumbent, workers, effort, cap, results_dir,
+              catalog_path, control, record=True):
+    incumbent = incumbent or DEFAULT_INCUMBENTS[shape]
+    version_start = backend.magnitude_version()
+    try:
+        inc, chal = _pair(backend, incumbent, challenger, items, workers, effort, cap)
+        control_result = "no control available"
+        if control:
+            c_inc, c_chal = _pair(backend, control[0], control[1], items, workers, effort, cap)
+            control_result = {"ollama": c_inc, "magnitude": c_chal,
+                              "engine_wins": challenger_wins(c_inc, c_chal)}
+    except BaseException:
+        for name in ("ollama", "magnitude"):
+            try:
+                backend.unload(name)
+            except Exception:
+                pass
+        raise
+    version_end = backend.magnitude_version()
+    if version_start != version_end:
+        verdict = "invalid"
+    else:
+        verdict = "challenger wins" if challenger_wins(inc, chal) else "incumbent holds"
+    inc["provenance"] = backend.model_provenance(incumbent)
+    chal["provenance"] = backend.model_provenance(challenger)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    result = {
+        "date": now.date().isoformat(),
+        "shape": shape,
+        "magnitude_version": version_start if verdict != "invalid" else None,
+        "magnitude_version_start": version_start,
+        "magnitude_version_end": version_end,
+        "cap_seconds": cap,
+        "incumbent": inc,
+        "challenger": chal,
+        "control": control_result,
+        "verdict": verdict,
+    }
+    if not record:
+        return result
+    os.makedirs(results_dir, exist_ok=True)
+    name = now.strftime("%Y%m%dT%H%M%S%fZ") + "-" + shape + ".json"
+    with open(os.path.join(results_dir, name), "w") as f:
+        json.dump(result, f, indent=2)
+    _append_catalog(catalog_path, result)
+    return result
+
+
+class LlocalBackend:
+    def __init__(self):
+        self._timed_out = {}
+
+    def run_item(self, model, prompt, flags, timeout):
+        started = time.monotonic()
+        try:
+            out = subprocess.run([sys.executable, LLOCAL, "run", model, prompt, *flags],
+                                 capture_output=True, text=True, timeout=timeout,
+                                 env={**os.environ, "LLOCAL_BENCH": "1"})
+        except subprocess.TimeoutExpired:
+            self._timed_out.setdefault(backend_of(model), set()).add(model)
+            return {"stdout": None, "seconds": time.monotonic() - started, "timed_out": True,
+                    "rc": None, "speed": None}
+        match = SPEED_LINE.search(out.stderr)
+        speed = {"prefill": float(match.group(1)), "decode": float(match.group(2))} if match else None
+        return {"stdout": out.stdout if out.returncode == 0 else None,
+                "seconds": time.monotonic() - started, "timed_out": False, "rc": out.returncode,
+                "speed": speed}
+
+    def unload(self, backend):
+        timed_out = self._timed_out.pop(backend, set())
+        if backend == "ollama" and timed_out:
+            # A killed client leaves Ollama generating; keep_alive=0 would queue behind it.
+            # pkill hits every runner, so only use it when no one else's model is loaded.
+            resident = llocal._ollama_resident() or []
+            if all(name in timed_out for name in resident):
+                subprocess.run(["pkill", "-f", "ollama runner"], capture_output=True)
+            else:
+                print("local-bench: warning: other Ollama models are loaded; not killing runners",
+                      file=sys.stderr)
+        out = subprocess.run([sys.executable, LLOCAL, "unload", "--backend", backend],
+                             capture_output=True, text=True)
+        if out.returncode != 0:
+            raise BenchAbort(out.stderr.strip() or f"unload of {backend} failed")
+
+    def magnitude_version(self):
+        result = llocal._magnitude_cli(["--version"])
+        return result[1].strip() if result and result[0] == 0 else None
+
+    def model_provenance(self, model):
+        if backend_of(model) == "ollama":
+            try:
+                tags = llocal._get("/api/tags")
+            except OSError:
+                return {"source": "ollama", "sha256": []}
+            digest = next((m.get("digest") for m in tags.get("models", []) if m.get("name") == model), None)
+            return {"source": "ollama manifest", "sha256": [digest] if digest else []}
+        shown = llocal._magnitude_cli(["models", "show", model, "--json"])
+        repos = []
+        if shown and shown[0] == 0:
+            catalog = (json.loads(shown[1] or "{}").get("model") or {}).get("catalogData") or {}
+            repos = [r for r in ((catalog.get("quant") or {}).get("repository"),
+                                 (catalog.get("drafter") or {}).get("repository")) if r]
+        hashes = []
+        for repo in repos:
+            snapshots = os.path.join(MAGNITUDE_HUB, "models--" + repo.replace("/", "--"), "snapshots")
+            for link in sorted(glob.glob(os.path.join(snapshots, "**", "*.gguf"), recursive=True)):
+                target = os.path.basename(os.path.realpath(link))
+                if target.startswith("lfs-sha256-"):
+                    hashes.append(target[len("lfs-sha256-"):])
+        return {"source": ", ".join("huggingface:" + r for r in repos) or "unknown", "sha256": hashes}
+
+
+def load_fixtures(shape):
+    with open(os.path.join(FIXTURES_DIR, shape + ".jsonl")) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="local-bench", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("shape", choices=SHAPES)
+    p.add_argument("--challenger", required=True)
+    p.add_argument("--incumbent")
+    p.add_argument("--workers", type=int, default=1)
+    p.add_argument("--effort", choices=("none", "low", "medium", "xhigh"),
+                   help="Magnitude reasoning effort (server default when omitted)")
+    p.add_argument("--cap", type=int, default=480, help="per-item wall-clock cap in seconds")
+    p.add_argument("--control", help="OLLAMA_MODEL,MAGNITUDE_MODEL serving the same weights")
+    p.add_argument("--limit", type=int,
+                   help="smoke run on the first N items; prints the verdict but records nothing")
+    args = p.parse_args(argv)
+    control = args.control.split(",", 1) if args.control else None
+    try:
+        items = load_fixtures(args.shape)[:args.limit] if args.limit else load_fixtures(args.shape)
+        result = benchmark(LlocalBackend(), args.shape, args.challenger, items,
+                           incumbent=args.incumbent, workers=args.workers, effort=args.effort,
+                           cap=args.cap, results_dir=RESULTS_DIR, catalog_path=CATALOG, control=control,
+                           record=not args.limit)
+    except BenchAbort as e:
+        print(f"local-bench: aborted: {e}", file=sys.stderr)
+        return 3
+    for label in ("incumbent", "challenger"):
+        s = result[label]
+        print("%-10s %-34s agree %2d/%d  complete %2d/%d  %.1fs/task  (load %.0fs, decode %s tok/s)" % (
+            label, s["model"], s["agreed"], s["items"], s["completed"], s["items"], s["time_per_task"],
+            s["load_seconds"], "%.1f" % s["median_decode_tps"] if s["median_decode_tps"] else "n/a"))
+    print("verdict:   " + result["verdict"] + "  (Magnitude %s)" % result["magnitude_version_start"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

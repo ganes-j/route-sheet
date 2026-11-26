@@ -21,6 +21,15 @@ Example host: Ollama on Apple Silicon (M-series), 128GB unified memory, MLX-opti
 - **Helper:** `~/.claude/bin/llocal` — the only way the agent should invoke these (poll / run / batch). See bottom.
 - **Poll (no model load):** `~/.claude/bin/llocal models` → hits `/api/tags`. Cheap; safe to run every time.
 
+**Second backend: Magnitude** (local MoE engine with SSD expert streaming, app at `/Applications/Magnitude.app`). `llocal` routes by model ID, so no other change is needed to use it:
+
+- **IDs:** `NAME:gguf:QUANT` (e.g. `qwen3.8-flash-next:gguf:q2`) or `local:NAME:HASH`. Anything else goes to Ollama. `llocal models` lists both backends (backend column); `llocal models --names` stays Ollama-only.
+- **Every Magnitude run declares PII status:** `--pii` or `--no-pii`; neither → refused. `--no-pii` is an honest declaration by the caller, not a check; route real PII with `--pii`.
+- **`--pii` gates (all must hold, else refused):** a passing, unexpired `bin/magnitude-egress-check` record for the running Magnitude version (needs the user to run a sudo capture — ask, do not retry); a `bin/local-bench` result at that version; network access off; port 10100 bound to loopback only.
+- **Reasoning:** `--reasoning-effort none|low|medium|xhigh` (Magnitude only; server default xhigh).
+- **Memory:** one backend resident at a time. `llocal unload [--backend ollama|magnitude|all]` before switching; it exits non-zero when it cannot confirm.
+- **Routing:** no §2 row prefers a Magnitude model until `bin/local-bench SHAPE --challenger ID` records a win (see **Benchmarked builds** below, appended by the tool).
+
 ---
 
 ## Local Model Inventory
@@ -29,6 +38,7 @@ Once `ROUTING_POLICY.md` has routed a task to `llocal`, pick the model here. Loc
 
 | Model | Type | Best for | Avoid | Parallel (`--workers`) | Size |
 |---|---|---|---|---|---|
+| `qwen3.8-flash-next:gguf:q2` | **Magnitude backend** — text+image LLM (180B MoE, ~6B active, 2-bit) | **Verified (local-bench 2026-11-25):** batch extraction 18/20 correct, 5.0s/task; PII classification 18/20, 7.0s/task (qwen3.5: 16/20 at 65.1s and 32.5s). Preferred for batch extraction. | PII until `magnitude-egress-check` passes (llocal refuses `--pii`); vision via `--image` (Ollama only); runs while an Ollama model is loaded (llocal unloads it first) | `--workers 1` (concurrency unmeasured) | 70.1 GB |
 | `qwen3.5:35b-a3b-coding-nvfp4` | Code/text LLM (35B MoE, ~3B active, MLX) | Code gen/refactor subtasks, batch text classification/extraction/summarization, JSON-schema extraction, autonomous loops | Correctness-critical SQL against prod, architecture decisions, anything shipped unverified. **Reasoning model — never cap with `--num-predict`** (any cap truncates before the answer → empty `out`). | ❌ **no gain** — 35B saturates the GPU per request (benchmarked 2026-06-25: 3 items, w1 52s vs w4 59s). Use `--workers 1`; run big batches sequential in background. | 21.9 GB |
 | `gpt-oss:120b` | General/reasoning LLM (117B MoE, ~5B active, MXFP4) | *Seed lean `(unverified — benchmark/community signal)`:* highest-quality LOCAL work — nuanced code refactor & extraction beyond the 35B's ceiling; general reasoning on private data kept off-cloud (fills the general-reasoning gap the candidate table flagged). | Correctness-critical / architecture (still weaker than the frontier coordinator); pure high-volume fan-out (slower per token than the small MoEs — send that to `gpt-oss:20b`/`phi4-mini`). **Reasoning model — don't cap with `--num-predict`.** | ❓ untested — 65 GB resident, ~5B active; likely seq, benchmark before `--workers`>1 | 65 GB |
 | `gpt-oss:20b` | Reasoning LLM (21B MoE, ~3.6B active, MXFP4) | *Seed lean `(unverified — benchmark/community signal)`:* fast fan-out / bulk classification & extraction at higher quality than phi4-mini; autonomous loops. | Correctness-critical work; deep-reasoning nuance (only 3.6B active). **Reasoning model — don't cap with `--num-predict`.** | ✅ **real gain** (*verified* — benchmarked 2026-07-22: 15 items, w1 10.1s vs w4 5.6s ≈ 1.8x; set `OLLAMA_NUM_PARALLEL=4` to match `--workers 4`) | 13 GB |
@@ -132,3 +142,10 @@ llocal batch MODEL items.jsonl --workers 4        # concurrent — only worth it
 ```
 
 Env: `OLLAMA_HOST` overrides the default endpoint. Stdlib-only Python 3, no deps.
+
+## Benchmarked builds
+
+Written by `bin/local-bench` (one row per recorded run); full results in `bench/results/`.
+
+| Date | Shape | Incumbent | Challenger | Magnitude | Verdict | Challenger sha256 |
+|---|---|---|---|---|---|---|

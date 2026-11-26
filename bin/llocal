@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""llocal — thin CLI over the local Ollama HTTP API.
+"""llocal — thin CLI over local Ollama and Magnitude HTTP APIs.
 
 Invocation primitive for offloading bounded subtasks to local models.
 Routing intelligence lives in ~/.claude/LOCAL_MODELS.md (read by Claude),
@@ -8,8 +8,15 @@ not here — this script only polls, runs, and batches.
   llocal models [--names]              poll installed models (no model load)
   llocal run MODEL [PROMPT]            single completion; PROMPT or stdin
        [--system S] [--json SCHEMA] [--temp T] [--num-predict N]
+       [--reasoning-effort {none,low,medium,xhigh}] [--pii | --no-pii]
   llocal batch MODEL FILE.jsonl        one completion per line; emits JSONL
        [--workers N] [...same run flags]
+  llocal unload [--backend ollama|magnitude|all]
+                                       free memory held by resident models
+
+Magnitude model IDs are NAME:gguf:QUANT or local:NAME:12_HEX. Every
+Magnitude run must declare --pii or --no-pii. Magnitude is fixed at
+http://127.0.0.1:10100/inference/v1; --reasoning-effort applies only there.
 
 --json takes either the literal string "json" (free-form JSON mode) or a
 JSON-Schema string (constrained output). batch lines are either a bare prompt
@@ -20,15 +27,32 @@ Env: OLLAMA_HOST (default http://localhost:11434). For real --workers>1
 concurrency set OLLAMA_NUM_PARALLEL on the server, else requests queue.
 """
 import argparse
+import base64
+import datetime
+import glob
 import json
 import os
+import re
 import socket
+import subprocess
 import sys
+import time
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+MAGNITUDE_BASE_URL = "http://127.0.0.1:10100/inference/v1"
+MAGNITUDE_CATALOG_ID = re.compile(r"^[^:]+:gguf:[^:]+$")
+MAGNITUDE_LOCAL_ID = re.compile(r"^local:[^:]+:[0-9a-fA-F]{12}$")
+MAGNITUDE_CLI = "/Applications/Magnitude.app/Contents/Resources/magnitude"
+UNLOAD_POLL_SECONDS = 1
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+EGRESS_STATE = os.path.expanduser("~/.claude/state/magnitude-egress.json")
+MAGNITUDE_CONFIG = os.path.expanduser("~/.magnitude/config.json")
+BENCH_RESULTS_DIR = os.path.join(REPO_ROOT, "bench", "results")
+LOOPBACK_LISTENERS = ("127.0.0.1", "[::1]", "::1", "localhost")
+UNLOAD_POLL_ATTEMPTS = 30
 
 
 def _is_timeout(exc):
@@ -37,9 +61,9 @@ def _is_timeout(exc):
     return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout))
 
 
-def _post(path, payload, timeout=600, retries=1):
+def _post(path, payload, timeout=600, retries=1, base_url=None):
     req = urllib.request.Request(
-        HOST + path,
+        (HOST if base_url is None else base_url) + path,
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
@@ -63,6 +87,23 @@ def _get(path, timeout=15):
         return json.load(r)
 
 
+def _magnitude_installed():
+    """Installed Magnitude catalog models, or None when Magnitude cannot be read."""
+    result = _magnitude_cli(["models", "list", "--json"])
+    if result is None:
+        return []
+    if result[0] != 0:
+        return None
+    try:
+        models = json.loads(result[1] or "{}").get("models", [])
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    # local: ids are Ollama's own GGUFs seen through Magnitude, already listed as Ollama models.
+    return [m for m in models
+            if (m.get("acquisitionState") or {}).get("_tag") == "Installed"
+            and not m.get("modelId", "").startswith("local:")]
+
+
 def cmd_models(args):
     try:
         data = _get("/api/tags")
@@ -70,13 +111,21 @@ def cmd_models(args):
         sys.exit(f"llocal: cannot reach Ollama at {HOST} — is `ollama serve` running? ({e})")
     models = sorted(data.get("models", []), key=lambda m: m["name"])
     if args.names:
+        # bakeoff discovers candidates from this output; keep it Ollama-only.
         for m in models:
             print(m["name"])
         return
     for m in models:
         d = m.get("details", {})
         size = round(m.get("size", 0) / 1e9, 1)
-        print(f"{m['name']:<34} {size:>5} GB  {d.get('family',''):<10} {d.get('parameter_size','')}")
+        print(f"{m['name']:<34} {size:>5} GB  {d.get('family',''):<10} {d.get('parameter_size',''):<8} ollama")
+    magnitude = _magnitude_installed()
+    if magnitude is None:
+        sys.stderr.write("llocal: Magnitude models not listed — cannot read Magnitude (is the app running?)\n")
+        return
+    for m in sorted(magnitude, key=lambda m: m["modelId"]):
+        size = round(m.get("storageBytes", 0) / 1e9, 1)
+        print(f"{m['modelId']:<34} {size:>5} GB  {'':<10} {'':<8} magnitude")
 
 
 def _resolve_format(json_arg):
@@ -98,36 +147,343 @@ def _guard_num_predict(model, num_predict):
                  "omit it (see LOCAL_MODELS.md)")
 
 
-def _chat(model, prompt, system, fmt, temp, num_predict, timeout=600):
+def _backend_for_model(model):
+    if MAGNITUDE_CATALOG_ID.fullmatch(model) or MAGNITUDE_LOCAL_ID.fullmatch(model):
+        return "magnitude"
+    return "ollama"
+
+
+def _validate_backend_args(args, backend):
+    if backend == "magnitude":
+        if args.pii_status is None:
+            sys.exit("llocal: every Magnitude run must declare PII status with --pii or --no-pii")
+        if args.image:
+            sys.exit("llocal: --image is not supported for Magnitude models; use an Ollama vision model")
+    elif args.reasoning_effort is not None:
+        sys.exit("llocal: --reasoning-effort is supported only for Magnitude models")
+
+
+def _magnitude_listeners():
+    """Listener hosts on port 10100, [] when nothing listens, None when it cannot be determined."""
+    try:
+        out = subprocess.run(["lsof", "-nP", "-iTCP:10100", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    # lsof exits 1 both for "no match" and for errors; only stderr tells them apart.
+    if out.returncode != 0 and (out.stdout.strip() or out.stderr.strip()):
+        return None
+    hosts = []
+    for line in out.stdout.splitlines()[1:]:
+        cols = line.split()
+        if len(cols) >= 9:
+            hosts.append(cols[8].rsplit(":", 1)[0])
+    return hosts
+
+
+def _load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _last_benchmarked_version():
+    paths = sorted(glob.glob(os.path.join(BENCH_RESULTS_DIR, "*.json")))
+    for path in reversed(paths):
+        result = _load_json(path) or {}
+        if (result.get("challenger") or {}).get("backend") != "magnitude":
+            continue
+        version = result.get("magnitude_version")
+        if version:
+            return version
+    return None
+
+
+def _egress_problem(running):
+    record = _load_json(EGRESS_STATE)
+    if not record:
+        return ("no egress record — ask the user to run bin/magnitude-egress-check (it needs a sudo "
+                "packet capture in their terminal); do not retry this run")
+    if record.get("result") != "pass":
+        return "the last bin/magnitude-egress-check did not pass"
+    try:
+        expires = datetime.datetime.fromisoformat(record["expires_at"])
+    except (KeyError, ValueError):
+        return "egress record has no valid expiry — rerun bin/magnitude-egress-check"
+    if expires <= datetime.datetime.now(datetime.timezone.utc):
+        return f"egress record expired at {record['expires_at']} — rerun bin/magnitude-egress-check"
+    if record.get("magnitude_version") != running:
+        return (f"egress record is for Magnitude {record.get('magnitude_version')}, running {running} — "
+                "rerun bin/magnitude-egress-check")
+    return None
+
+
+def _check_magnitude_trust(pii):
+    # local-bench times every item; skip the version probe there unless PII is at stake.
+    if not pii and os.environ.get("LLOCAL_BENCH"):
+        return
+    result = _magnitude_cli(["--version"])
+    running = result[1].strip() if result and result[0] == 0 else None
+    benched = _last_benchmarked_version()
+    if benched is None:
+        version_problem = "no Magnitude benchmark recorded — run bin/local-bench"
+    elif running != benched:
+        version_problem = (f"running Magnitude {running} differs from last benchmarked {benched} — "
+                           "rerun bin/local-bench")
+    else:
+        version_problem = None
+    if not pii:
+        if version_problem:
+            sys.stderr.write(f"llocal: warning: {version_problem}\n")
+        return
+    problems = [p for p in (version_problem, _egress_problem(running)) if p]
+    if os.path.exists(MAGNITUDE_CONFIG):
+        config = _load_json(MAGNITUDE_CONFIG)
+        if not isinstance(config, dict):
+            problems.append(f"cannot read {MAGNITUDE_CONFIG} to confirm network access is off")
+        elif (config.get("network") or {}).get("enabled"):
+            problems.append(f"Magnitude network access is enabled in {MAGNITUDE_CONFIG} — turn it off")
+    listeners = _magnitude_listeners()
+    exposed = [h for h in listeners or [] if h not in LOOPBACK_LISTENERS]
+    if listeners is None:
+        problems.append("cannot verify which addresses Magnitude listens on (lsof failed)")
+    elif exposed:
+        problems.append("Magnitude listens beyond loopback on port 10100 (" + ", ".join(exposed) + ")")
+    if problems:
+        sys.exit("llocal: refusing --pii run on Magnitude: " + "; ".join(problems))
+
+
+def _encode_images(paths):
+    out = []
+    for p in paths or []:
+        with open(p, "rb") as f:
+            out.append(base64.b64encode(f.read()).decode())
+    return out
+
+
+def _report_speed(backend, model, data):
+    if backend == "magnitude":
+        timings = data.get("timings") or {}
+        prefill = timings.get("prompt_per_second")
+        decode = timings.get("predicted_per_second")
+    else:
+        prompt_count = data.get("prompt_eval_count")
+        prompt_duration = data.get("prompt_eval_duration")
+        eval_count = data.get("eval_count")
+        eval_duration = data.get("eval_duration")
+        if None in (prompt_count, prompt_duration, eval_count, eval_duration):
+            return
+        if not prompt_duration or not eval_duration:
+            return
+        prefill = prompt_count * 1_000_000_000 / prompt_duration
+        decode = eval_count * 1_000_000_000 / eval_duration
+    if prefill is None or decode is None:
+        return
+    sys.stderr.write(
+        f"llocal: {backend} {model} prefill {prefill:g} tok/s, decode {decode:g} tok/s\n"
+    )
+
+
+def _chat(model, prompt, system, fmt, temp, num_predict, timeout=600, images=None,
+          reasoning_effort=None):
+    backend = _backend_for_model(model)
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    user = {"role": "user", "content": prompt}
+    if backend == "ollama":
+        encoded = _encode_images(images)
+        if encoded:
+            user["images"] = encoded  # ollama /api/chat accepts base64 images (VLMs, e.g. llava)
+    messages.append(user)
     payload = {"model": model, "messages": messages, "stream": False}
-    if fmt is not None:
-        payload["format"] = fmt
-    options = {}
-    if temp is not None:
-        options["temperature"] = temp
-    if num_predict is not None:
-        options["num_predict"] = num_predict
-    if options:
-        payload["options"] = options
-    data = _post("/api/chat", payload, timeout=timeout)
-    return data["message"]["content"]
+    if backend == "magnitude":
+        if fmt == "json":
+            payload["response_format"] = {"type": "json_object"}
+        elif fmt is not None:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "output", "schema": fmt},
+            }
+        if temp is not None:
+            payload["temperature"] = temp
+        if num_predict is not None:
+            payload["max_tokens"] = num_predict
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        data = _post("/chat/completions", payload, timeout=timeout,
+                     base_url=MAGNITUDE_BASE_URL)
+        out = data["choices"][0]["message"]["content"]
+    else:
+        if fmt is not None:
+            payload["format"] = fmt
+        options = {}
+        if temp is not None:
+            options["temperature"] = temp
+        if num_predict is not None:
+            options["num_predict"] = num_predict
+        if options:
+            payload["options"] = options
+        data = _post("/api/chat", payload, timeout=timeout)
+        out = data["message"]["content"]
+    _report_speed(backend, model, data)
+    return out
+
+
+def _magnitude_error(exc, model, timeout):
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body = exc.read().decode(errors="replace")
+        finally:
+            exc.close()
+        return f"llocal: Magnitude error {exc.code} for model {model}: {body}"
+    if _is_timeout(exc):
+        return (f"llocal: Magnitude request timed out after {timeout}s (retried once) — "
+                "model too slow or Magnitude stuck")
+    if isinstance(exc, urllib.error.URLError):
+        return ("llocal: cannot reach Magnitude — open the Magnitude app or run "
+                f"`magnitude serve` ({exc})")
+    return None
+
+
+def _magnitude_cli(args):
+    """(returncode, stdout); None only when the CLI is not installed."""
+    try:
+        out = subprocess.run([MAGNITUDE_CLI, *args], capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        return None
+    except (OSError, subprocess.TimeoutExpired):
+        return -1, ""
+    return out.returncode, out.stdout
+
+
+def _ollama_resident():
+    """Resident model names; [] when Ollama is not running; None when residency is unknown."""
+    try:
+        data = _get("/api/ps")
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ConnectionRefusedError):
+            return []
+        return None
+    except (OSError, ValueError):
+        return None
+    return [m["name"] for m in data.get("models", [])]
+
+
+def _magnitude_resident():
+    """Resident model IDs; [] when Magnitude is not installed; None when residency is unknown."""
+    result = _magnitude_cli(["models", "list", "--json"])
+    if result is None:
+        return []
+    if result[0] != 0:
+        return None
+    try:
+        models = json.loads(result[1] or "{}").get("models", [])
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    resident = []
+    for model in models:
+        residency = (model.get("acquisitionState") or {}).get("residencyState") or {}
+        # Unknown tags count as resident so a new Magnitude state fails closed, not open.
+        if residency.get("_tag") not in (None, "Stopped", "Unloaded"):
+            resident.append(model.get("modelId", "?"))
+    return resident
+
+
+def _wait_until_gone(resident, read):
+    """Poll `read` until nothing in `resident` remains; unknown readings keep the last known set."""
+    remaining = resident
+    for _ in range(UNLOAD_POLL_ATTEMPTS):
+        current = read()
+        if current is not None:
+            remaining = [name for name in resident if name in current]
+            if not remaining:
+                return []
+        time.sleep(UNLOAD_POLL_SECONDS)
+    return remaining
+
+
+def _unload_ollama():
+    resident = _ollama_resident()
+    if resident is None:
+        return None
+    if not resident:
+        return [], []
+    for name in resident:
+        try:
+            _post("/api/generate", {"model": name, "keep_alive": 0}, timeout=60)
+        except (urllib.error.URLError, OSError):
+            pass
+    return resident, _wait_until_gone(resident, _ollama_resident)
+
+
+def _unload_magnitude():
+    resident = _magnitude_resident()
+    if resident is None:
+        return None
+    if not resident:
+        return [], []
+    _magnitude_cli(["models", "stop"])
+    # `models stop` returns before the model leaves memory; observation commands never wait.
+    return resident, _wait_until_gone(resident, _magnitude_resident)
+
+
+def _free_other_backend(backend):
+    """Unload the other backend's resident models so one backend holds memory."""
+    if os.environ.get("LLOCAL_BENCH"):
+        return
+    outcome = _unload_magnitude() if backend == "ollama" else _unload_ollama()
+    if outcome is None or outcome[1]:
+        other = "Magnitude" if backend == "ollama" else "Ollama"
+        sys.stderr.write(f"llocal: warning: could not confirm {other} released its memory; "
+                         "this run may be slower\n")
+
+
+def cmd_unload(args):
+    backends = ["ollama", "magnitude"] if args.backend == "all" else [args.backend]
+    unloaded, stuck, unknown = [], [], []
+    for backend in backends:
+        outcome = _unload_ollama() if backend == "ollama" else _unload_magnitude()
+        if outcome is None:
+            unknown.append(backend)
+            continue
+        done, remaining = outcome
+        unloaded += [f"{backend} {name}" for name in done if name not in remaining]
+        stuck += [f"{backend} {name}" for name in remaining]
+    if unknown or stuck:
+        parts = [f"cannot read which {b} models are resident" for b in unknown]
+        if stuck:
+            parts.append("still resident after unload: " + ", ".join(stuck))
+        sys.exit("llocal: " + "; ".join(parts))
+    print("unloaded: " + ", ".join(unloaded) if unloaded else "nothing to unload")
 
 
 def cmd_run(args):
     _guard_num_predict(args.model, args.num_predict)
+    backend = _backend_for_model(args.model)
+    _validate_backend_args(args, backend)
+    if backend == "magnitude":
+        _check_magnitude_trust(args.pii_status)
+    _free_other_backend(backend)
     prompt = args.prompt if args.prompt is not None else sys.stdin.read()
     if not prompt.strip():
         sys.exit("llocal: empty prompt (pass an arg or pipe via stdin)")
     fmt = _resolve_format(args.json)
     try:
-        out = _chat(args.model, prompt, args.system, fmt, args.temp, args.num_predict, args.timeout)
+        out = _chat(args.model, prompt, args.system, fmt, args.temp, args.num_predict, args.timeout,
+                    images=args.image, reasoning_effort=args.reasoning_effort)
     except urllib.error.HTTPError as e:
-        sys.exit(f"llocal: Ollama error {e.code}: {e.read().decode(errors='replace')}")
+        if backend == "magnitude":
+            sys.exit(_magnitude_error(e, args.model, args.timeout))
+        hint = " (Magnitude model IDs look like NAME:gguf:QUANT or local:NAME:HASH)" if e.code == 404 else ""
+        sys.exit(f"llocal: Ollama error {e.code}: {e.read().decode(errors='replace')}{hint}")
     except Exception as e:
+        if backend == "magnitude":
+            message = _magnitude_error(e, args.model, args.timeout)
+            if message:
+                sys.exit(message)
         if _is_timeout(e):
             sys.exit(f"llocal: request timed out after {args.timeout}s (retried once) — model too slow or Ollama stuck")
         if isinstance(e, urllib.error.URLError):
@@ -138,6 +494,11 @@ def cmd_run(args):
 
 def cmd_batch(args):
     _guard_num_predict(args.model, args.num_predict)
+    backend = _backend_for_model(args.model)
+    _validate_backend_args(args, backend)
+    if backend == "magnitude":
+        _check_magnitude_trust(args.pii_status)
+    _free_other_backend(backend)
     fmt = _resolve_format(args.json)
     items = []
     with open(args.file) as f:
@@ -150,15 +511,24 @@ def cmd_batch(args):
                 if isinstance(obj, str):
                     items.append({"id": i, "prompt": obj})
                 else:
-                    items.append({"id": obj.get("id", i), "prompt": obj["prompt"]})
+                    items.append({"id": obj.get("id", i), "prompt": obj["prompt"],
+                                  "images": obj.get("images")})
             except (json.JSONDecodeError, KeyError):
                 items.append({"id": i, "prompt": line})
+    if backend == "magnitude" and any(item.get("images") for item in items):
+        sys.exit("llocal: images are not supported for Magnitude models; use an Ollama vision model")
 
     def work(item):
         try:
-            out = _chat(args.model, item["prompt"], args.system, fmt, args.temp, args.num_predict, args.timeout)
+            out = _chat(args.model, item["prompt"], args.system, fmt, args.temp, args.num_predict, args.timeout,
+                        images=item.get("images") or args.image,
+                        reasoning_effort=args.reasoning_effort)
             return {"id": item["id"], "out": out}
         except Exception as e:
+            if backend == "magnitude":
+                message = _magnitude_error(e, args.model, args.timeout)
+                if message:
+                    return {"id": item["id"], "error": message}
             return {"id": item["id"], "error": str(e)}
 
     ok = errs = 0
@@ -187,9 +557,18 @@ def main():
 
     def add_run_flags(sp):
         sp.add_argument("--system", help="system prompt")
+        sp.add_argument("--image", action="append",
+                        help="image file for a VLM (e.g. llava); repeatable. batch lines may set 'images':[...]")
         sp.add_argument("--json", help="'json' for free-form JSON, or a JSON-Schema string for constrained output")
         sp.add_argument("--temp", type=float, help="temperature")
         sp.add_argument("--num-predict", type=int, dest="num_predict", help="max tokens to generate")
+        sp.add_argument("--reasoning-effort", choices=("none", "low", "medium", "xhigh"),
+                        help="Magnitude reasoning effort (server default when omitted)")
+        pii = sp.add_mutually_exclusive_group()
+        pii.add_argument("--pii", action="store_const", const=True, dest="pii_status",
+                         help="declare that the request contains PII")
+        pii.add_argument("--no-pii", action="store_const", const=False, dest="pii_status",
+                         help="declare that the request does not contain PII")
         sp.add_argument("--timeout", type=int, default=600,
                         help="per-request timeout seconds (default 600; retried once on timeout)")
 
@@ -205,6 +584,10 @@ def main():
     pb.add_argument("--workers", type=int, default=1, help="concurrent requests (set OLLAMA_NUM_PARALLEL too)")
     add_run_flags(pb)
     pb.set_defaults(func=cmd_batch)
+
+    pu = sub.add_parser("unload", help="unload resident models so one backend holds memory")
+    pu.add_argument("--backend", choices=("ollama", "magnitude", "all"), default="all")
+    pu.set_defaults(func=cmd_unload)
 
     args = p.parse_args()
     args.func(args)

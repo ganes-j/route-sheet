@@ -362,6 +362,10 @@ def _codex_drift_cli(argv):
 # Ollama IDs may be namespaced (`host/user/model`) and carry uppercase
 # (`...GGUF`, `Qwen/...`); allow `/` and mixed case so valid tags aren't dropped.
 _OLLAMA_TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)?\Z")
+# Same two shapes bin/llocal routes to Magnitude.
+_MAGNITUDE_ID_RE = re.compile(r"(?:[^:\s`|]+:gguf:[^:\s`|]+|local:[^:\s`|]+:[0-9a-fA-F]{12})\Z")
+MAGNITUDE_CLI = "/Applications/Magnitude.app/Contents/Resources/magnitude"
+MAGNITUDE_UNREACHABLE = object()
 
 
 def _default_local_catalog():
@@ -401,7 +405,7 @@ def _parse_listed_local_models(text):
         if not match:
             continue
         token = match.group(1).strip()
-        if _looks_like_ollama_tag(token) and token not in listed:
+        if (_looks_like_ollama_tag(token) or _MAGNITUDE_ID_RE.fullmatch(token)) and token not in listed:
             listed.append(token)
     return listed
 
@@ -431,7 +435,28 @@ def _fetch_installed_models(host=None, timeout=5):
     return [m["name"] for m in data.get("models", []) if m.get("name")]
 
 
-def local_drift(catalog_path=None, installed=None, host=None, timeout=5):
+def _fetch_magnitude_installed(timeout=30):
+    """Installed Magnitude catalog model ids, or MAGNITUDE_UNREACHABLE.
+
+    `local:` ids are Ollama's own GGUFs seen through Magnitude, so they are not
+    separate installs and are left out.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run([MAGNITUDE_CLI, "models", "list", "--json"],
+                             capture_output=True, text=True, timeout=timeout)
+        models = json.loads(out.stdout or "{}").get("models", []) if out.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        models = None
+    if models is None:
+        return MAGNITUDE_UNREACHABLE
+    return [m["modelId"] for m in models
+            if (m.get("acquisitionState") or {}).get("_tag") == "Installed"
+            and not m.get("modelId", "").startswith("local:")]
+
+
+def local_drift(catalog_path=None, installed=None, host=None, timeout=5, magnitude_installed=None):
     """Detect drift between LOCAL_MODELS.md's installed inventory table and the
     models actually installed in Ollama. Reports + proposes; NEVER writes.
 
@@ -440,6 +465,11 @@ def local_drift(catalog_path=None, installed=None, host=None, timeout=5):
     an implicit/explicit `:latest`. Two drift directions are surfaced:
     `missing_from_table` (pulled but undocumented → propose an add-row) and
     `stale_in_table` (documented but no longer installed → propose verify/drop).
+
+    Rows whose id has a Magnitude shape are reconciled against Magnitude's own
+    model list instead (`magnitude_installed`; fetched live only when the table
+    has such rows). When Magnitude cannot be read they land in `unverified`,
+    never in drift.
     """
     catalog_path = catalog_path or _default_local_catalog()
     report = {
@@ -448,6 +478,7 @@ def local_drift(catalog_path=None, installed=None, host=None, timeout=5):
         "listed": [],
         "missing_from_table": [],
         "stale_in_table": [],
+        "unverified": [],
         "proposed_edits": [],
         "errors": [],
     }
@@ -471,6 +502,10 @@ def local_drift(catalog_path=None, installed=None, host=None, timeout=5):
 
     listed = _parse_listed_local_models(text)
     report["listed"] = listed
+    magnitude_listed = [t for t in listed if _MAGNITUDE_ID_RE.fullmatch(t)]
+    listed = [t for t in listed if t not in magnitude_listed]
+    if magnitude_installed is None:
+        magnitude_installed = _fetch_magnitude_installed() if magnitude_listed else []
 
     if installed is None:
         try:
@@ -481,6 +516,24 @@ def local_drift(catalog_path=None, installed=None, host=None, timeout=5):
                 "could not fetch installed models: %r" % exc)
             return report
     report["installed"] = list(installed)
+    installed = [t for t in installed if not _MAGNITUDE_ID_RE.fullmatch(t)]
+
+    if magnitude_installed is MAGNITUDE_UNREACHABLE:
+        report["unverified"] = list(magnitude_listed)
+    else:
+        for model in magnitude_installed:
+            if model not in magnitude_listed:
+                report["missing_from_table"].append(model)
+                report["proposed_edits"].append({
+                    "file": catalog_path, "action": "add-row", "model": model,
+                    "note": "installed in Magnitude but absent from the inventory table — "
+                            "add a row only after bin/local-bench measures it"})
+        for model in magnitude_listed:
+            if model not in magnitude_installed:
+                report["stale_in_table"].append(model)
+                report["proposed_edits"].append({
+                    "file": catalog_path, "action": "flag-stale", "model": model,
+                    "note": "listed in the inventory table but not installed in Magnitude"})
 
     listed_by_key = {_normalize_ollama_tag(t): t for t in listed}
     installed_by_key = {_normalize_ollama_tag(t): t for t in installed}

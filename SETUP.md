@@ -44,7 +44,7 @@ Present the exact write list for the target tier and get a yes before any write.
 
 **Tier 2 adds:** copy → `~/.claude/skills/codex-dispatch/SKILL.md`, `~/.claude/bin/codex-dispatch-run` (`chmod +x`; from `bin/`), `~/.claude/CODEX_MODELS.md` (from `templates/`; the runner validates a tier suffix against it). (No writes to `~/.codex/` — ever.)
 
-**Tier 3 adds:** copy → `~/.claude/bin/llocal` (`chmod +x`), copy → `~/.claude/LOCAL_MODELS.md`.
+**Tier 3 adds:** copy → `~/.claude/bin/llocal` (`chmod +x`), copy → `~/.claude/LOCAL_MODELS.md`. Optional second backend (Magnitude for MoE models too big for RAM): also copy `bin/local-bench` and `bin/magnitude-egress-check` → `~/.claude/bin/` (`chmod +x`) and `bench/fixtures/` → `~/.claude/bench/fixtures/`. A Magnitude model earns a §2 row only through a recorded `local-bench` win, and `--pii` runs stay refused until `magnitude-egress-check` passes (see `LOCAL_MODELS.md`).
 
 Nothing else is touched. The user can exclude any item; record exclusions for the report.
 

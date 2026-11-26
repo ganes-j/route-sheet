@@ -171,5 +171,48 @@ class LocalDriftTests(unittest.TestCase):
         self.assertEqual(r["proposed_edits"], [])
 
 
+class MagnitudeRowDriftTest(unittest.TestCase):
+    QWEN = "qwen3.8-flash-next:gguf:q2"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cat = os.path.join(self.tmp.name, "LOCAL_MODELS.md")
+        with open(self.cat, "w") as f:
+            f.write(local_catalog(inventory=list(INSTALLED) + [self.QWEN]))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_three_segment_magnitude_id_is_listed(self):
+        r = ms.local_drift(catalog_path=self.cat, installed=list(INSTALLED), magnitude_installed=[self.QWEN])
+        self.assertIn(self.QWEN, r["listed"])
+
+    def test_magnitude_row_installed_is_not_drift(self):
+        r = ms.local_drift(catalog_path=self.cat, installed=list(INSTALLED), magnitude_installed=[self.QWEN])
+        self.assertEqual(r["status"], "ok")
+        self.assertNotIn(self.QWEN, r["stale_in_table"])
+
+    def test_magnitude_row_not_installed_is_stale(self):
+        r = ms.local_drift(catalog_path=self.cat, installed=list(INSTALLED), magnitude_installed=[])
+        self.assertEqual(r["status"], "drift")
+        self.assertIn(self.QWEN, r["stale_in_table"])
+
+    def test_magnitude_down_marks_rows_unverified_not_drift(self):
+        r = ms.local_drift(catalog_path=self.cat, installed=list(INSTALLED),
+                           magnitude_installed=ms.MAGNITUDE_UNREACHABLE)
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["unverified"], [self.QWEN])
+
+    def test_installed_magnitude_model_missing_from_table_is_drift(self):
+        r = ms.local_drift(catalog_path=self.cat, installed=list(INSTALLED),
+                           magnitude_installed=[self.QWEN, "deepseek-v4.1-flash:gguf:iq2-xxs"])
+        self.assertIn("deepseek-v4.1-flash:gguf:iq2-xxs", r["missing_from_table"])
+
+    def test_magnitude_ids_never_compared_against_ollama(self):
+        r = ms.local_drift(catalog_path=self.cat, installed=list(INSTALLED) + [self.QWEN],
+                           magnitude_installed=[self.QWEN])
+        self.assertEqual(r["missing_from_table"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

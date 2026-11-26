@@ -10,7 +10,7 @@ The master task-shape → executor table for the model router. Consulted at plan
 
 These are hard gates checked BEFORE the task-shape table. A task that matches a Codex-friendly shape but trips a constraint does not go to Codex.
 
-- **PII-bound work NEVER routes to Codex** (local or cloud). Always llocal or coordinator. No override, no auto-mode exception. PII status is a property of the *task* (decided at routing time), not the directory.
+- **PII-bound work NEVER routes to Codex** (local or cloud). Always llocal or coordinator. No override, no auto-mode exception. PII status is a property of the *task* (decided at routing time), not the directory. Both local backends behind `llocal` (Ollama, Magnitude) are "local"; Magnitude additionally needs `--pii` and its trust gates (`LOCAL_MODELS.md`).
 - **Prod-credential block (the one that gates Codex on a working dir).** Default is **allow** — `.env` presence alone does not block. Block only when the dispatch dir holds a *live prod credential*:
   - a connection string with a **non-localhost host** in any `.env`/config file (the prod-DB case — serious and trivially detectable), OR
   - a file on the **prod deny-list** below.
@@ -41,8 +41,8 @@ Match a unit's shape to a row; apply the constraint layer first. Each row lists 
 | bugfix-with-known-repro | codex-implementer ★❓ | Repro + expected behavior in the unit. |
 | mechanical-refactor | codex-implementer ★❓ | Extract/rewire with tests; no design latitude. |
 | CI/dep/test-bulk | codex-implementer ★❓ · codex-implementer:gpt-5.6-luna ❓ | Test authoring / dep bumps / tooling scripts from clear spec. A Codex candidate may carry a tier suffix; `route_pick` treats it as its own candidate and the manifest row carries it to `codex-dispatch-run`, which passes `-m`. Luna is the low-stakes challenger (fastest, cheapest tier per `CODEX_MODELS.md`); it earns ★ only through §3 outcomes. |
-| batch-extraction (text/JSON) | qwen3.5 ★❓ · gpt-oss:20b ❓ · gpt-oss:120b ❓hq | Candidates are llocal models (pick the concrete tag per `LOCAL_MODELS.md`). Bulk structured extraction. Verify every item (llocal drops on timeout). `hq` = the higher-quality lane. |
-| PII-batch classification | qwen3.5 ★❓ · gpt-oss:20b ❓ | llocal models. Constraint layer forces local. Keep a deterministic ground-truth path. |
+| batch-extraction (text/JSON) | qwen3.8-flash-next:gguf:q2 ★❓ (local-bench 2026-11-25: 18/20 agree, 20/20 complete, 5.0s/task vs qwen3.5 16/20, 18/20, 65.1s; ★ by maintainer sign-off 2026-11-25) · qwen3.5 ❓ · gpt-oss:20b ❓ · gpt-oss:120b ❓hq | Candidates are llocal models (pick the concrete tag per `LOCAL_MODELS.md`). Bulk structured extraction. Verify every item (llocal drops on timeout). `hq` = the higher-quality lane. |
+| PII-batch classification | qwen3.8-flash-next:gguf:q2 ★❓ (local-bench 2026-11-25: 18/20 agree, 7.0s/task vs qwen3.5 16/20, 32.5s; ★ by maintainer sign-off 2026-11-25, effective on magnitude-egress-check pass 2026-11-26, Magnitude 0.3.2) · qwen3.5 ❓ · gpt-oss:20b ❓ | llocal models. Constraint layer forces local. Keep a deterministic ground-truth path. |
 | vision / OCR batch | qwen3-vl ★❓ · llava ❓ | llocal vision model. Image → text. `qwen3-vl` (current-gen VLM) preferred over the dated `llava` (kept as fallback); pick the concrete tag per `LOCAL_MODELS.md`. `❓` until a real routed vision unit produces an outcome. |
 | huge-context sweep | haiku-scout ★❓ | Read-only; `★` haiku-scout for cheap/fast. **Escalate to codex-scout** when one big working context or an independent model helps (a coordinator judgment, not a candidate cell — scout lanes aren't a bake-off matrix). **Zero demand on execution plans** (baseline) — value is in research/planning, ad-hoc. |
 | adversarial / second-opinion review | codex-scout ★❓ | Read-only, independent model. Note: reviewing Codex-*written* output is a never-delegate gate. |
