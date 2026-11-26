@@ -17,7 +17,7 @@ OpenAI's Codex CLI in write mode — for frozen-spec implementation, bugfix-with
 Codex in read-only mode — huge-context sweeps and adversarial / second-opinion reviews where an independent model helps. Returns conclusions, not diffs. Reviewing Codex-*written* output is never delegated to it.
 
 ### llocal
-The stdlib CLI ([bin/llocal](bin/llocal)) that runs local Ollama models for bulk text/JSON extraction, PII-bound batch work, and vision/OCR. The constraint layer forces PII-bound work here (or to the coordinator), never to a third-party executor.
+The stdlib CLI ([bin/llocal](bin/llocal)) that runs local models for bulk text/JSON extraction, PII-bound batch work, and vision/OCR. Two backends sit behind it, chosen by model ID: Ollama, and Magnitude for MoE models too large for RAM. Only one is resident at a time. The constraint layer forces PII-bound work here (or to the coordinator), never to a third-party executor.
 
 ### haiku-scout
 The cheapest read tier — a small Claude model for large-context reads and "where is X" lookups. Read-only, like codex-scout.
@@ -58,6 +58,9 @@ The single `·`-delimited line every completed unit emits, in the §6 grammar (`
 
 ### Outcome ledger
 The accumulated outcome lines — in a plan's manifest `## Execution log`, or `router-adhoc-outcomes.md` for ad-hoc work. The audit trail of what ran where, on whose say-so, verified how; the flywheel's only input. See [docs/outcome-ledger.md](docs/outcome-ledger.md).
+
+### Egress check
+The gate that must pass before PII-bound work runs on Magnitude: canary prompts run while a pid-scoped packet capture watches every Magnitude process, and any off-machine traffic fails it. A pass is recorded per Magnitude version and expires; a new version needs a new pass. Paired with a recorded `local-bench` win, which a Magnitude model needs before it earns a routing row.
 
 ### Circuit breaker
 codex-dispatch's guard that stops re-trying a failing Codex unit and falls back to the coordinator instead of looping. The fallback is recorded as a drift-log line.
